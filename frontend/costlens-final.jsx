@@ -1,0 +1,5606 @@
+import { useState, useEffect, useRef } from "react";
+
+// ═══════════════════════════════════════════════════════════════
+// COSTLENS — Complete Dynamic Website
+// Landing Page + Auth + Costing Platform + Ebook Library
+// ═══════════════════════════════════════════════════════════════
+
+const OH=0.15,PROFIT=0.08;
+// ─── INLINE SVG LOGO (magnifying lens with cost bars) ───
+const CLIcon=({size=22,color})=><svg width={size} height={size} viewBox="0 0 56 56" fill="none" xmlns="http://www.w3.org/2000/svg" style={{display:"inline-block",verticalAlign:"middle",flexShrink:0}}>
+  <circle cx="22" cy="22" r="16" stroke={color||"var(--ac)"} strokeWidth="3" fill="none"/>
+  <line x1="33" y1="33" x2="44" y2="44" stroke={color||"var(--ac)"} strokeWidth="3" strokeLinecap="round"/>
+  <rect x="12" y="16" width="5.5" height="12" rx="1.5" fill="#2E86C1" opacity=".9"/>
+  <rect x="19" y="19" width="5.5" height="9" rx="1.5" fill="#10B981" opacity=".9"/>
+  <rect x="26" y="13" width="5.5" height="15" rx="1.5" fill="#F59E0B" opacity=".9"/>
+</svg>;
+const AI_DISCLAIMER="AI-generated insights are for decision support only. Verify before use in commercial negotiations.";
+const API_HEADERS={"Content-Type":"application/json","x-api-key":"YOUR-API-KEY-HERE","anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"};
+const apiFetch=(url,opts)=>fetch(url,opts);
+// ═══════════════════════════════════════════════════════════════
+// BETA ACCESS CONTROL
+// ═══════════════════════════════════════════════════════════════
+const BETA_CONFIG={
+  enabled:true,
+  launchDate:"2026-03-06",
+  durationDays:14,
+  adminEmail:"pratap.ranjan@yahoo.co.in",
+  webhookURL:"", // Set your webhook.site or Google Apps Script URL here
+};
+// 10 single-use invite codes — send any code to anyone via WhatsApp/LinkedIn
+// Once used, the code is consumed and can't be reused
+const BETA_CODES=[
+  "CLENS-7K42","CLENS-3M91","CLENS-4W58","CLENS-2F73","CLENS-6N15",
+  "CLENS-9R36","CLENS-8J27","CLENS-1D64","CLENS-5T89","CLENS-0X53"
+];
+const ADMIN_CODE="CLENS-ADMIN";
+const isBetaExpired=()=>{const end=new Date(BETA_CONFIG.launchDate);end.setDate(end.getDate()+BETA_CONFIG.durationDays);return new Date()>end};
+const betaEndDate=()=>{const end=new Date(BETA_CONFIG.launchDate);end.setDate(end.getDate()+BETA_CONFIG.durationDays);return end.toLocaleDateString("en-IN",{day:"numeric",month:"short",year:"numeric"})};
+const betaDaysLeft=()=>{const end=new Date(BETA_CONFIG.launchDate);end.setDate(end.getDate()+BETA_CONFIG.durationDays);const diff=Math.ceil((end-new Date())/(1000*60*60*24));return Math.max(0,diff)};
+
+async function logBetaEvent(type,data){
+  try{
+    const events=await dbGet("cl-beta-events")||[];
+    events.push({type,ts:new Date().toISOString(),ua:navigator.userAgent?.slice(0,100),...data});
+    if(events.length>500)events.splice(0,events.length-500);
+    await dbSet("cl-beta-events",events);
+  }catch{}
+  if((type==="UNAUTHORIZED_REGISTER"||type==="UNAUTHORIZED_LOGIN"||type==="INVALID_CODE"||type==="CODE_REUSE")&&BETA_CONFIG.webhookURL){
+    try{fetch(BETA_CONFIG.webhookURL,{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({event:type,email:data.email||"unknown",time:new Date().toISOString(),detail:data.detail||"",platform:"CostLens Beta"})}).catch(()=>{})}catch{}
+  }
+}
+
+const SC_CATS=[{key:"rawMaterial",label:"Raw Material",color:"#3b82f6"},{key:"processing",label:"Manufacturing / Processing",color:"#06b6d4"},{key:"secondary",label:"Secondary / Finishing",color:"#14b8a6"},{key:"overheads",label:"Factory Overheads",color:"#f59e0b"},{key:"rejection",label:"Rejection / Scrap",color:"#ef4444"},{key:"inventoryCarry",label:"Inventory Carrying Cost",color:"#8b5cf6"},{key:"packaging",label:"Packaging",color:"#0891b2"},{key:"logistics",label:"Logistics / Freight",color:"#64748b"},{key:"inspection",label:"Inspection / QC",color:"#059669"},{key:"profit",label:"Supplier Profit",color:"#dc2626"}];
+const VOL_D={plus20:{rm:0.985,proc:0.970,sec:0.990},plus30:{rm:0.975,proc:0.950,sec:0.985},plus40:{rm:0.965,proc:0.930,sec:0.980}};
+const VOL_SLABS=[{key:"base",label:"Base"},{key:"plus20",label:"+20%"},{key:"plus30",label:"+30%"},{key:"plus40",label:"+40%"}];
+const MATS=[{n:"Mild Steel / CRS",s:70},{n:"SS 304",s:240},{n:"SS 316",s:310},{n:"Aluminum 6061",s:300},{n:"Aluminum 6063",s:285},{n:"Cast Iron",s:55},{n:"Brass",s:500},{n:"Copper",s:620},{n:"D2 Tool Steel",s:320},{n:"P20 Mould Steel",s:180},{n:"H13 Die Steel",s:350},{n:"PP",s:125},{n:"ABS",s:160},{n:"Nylon PA6",s:240},{n:"Corrugated Board",s:32},{n:"Other",s:100}];
+const matR=n=>MATS.find(m=>m.n===n)?.s||100;
+
+// ─── MODULE REGISTRY ───
+const MODS=[
+  {id:"should-cost",icon:"🏭",name:"Component Should-Cost",cat:"Manufacturing",desc:"Zero-based process sheet from drawings",color:"#2d7ff9",custom:true},
+  {id:"tool-cost",icon:"🔧",name:"Tool / Die / Mould",cat:"Manufacturing",desc:"Bottom-up tooling cost + amortization",color:"#a78bfa",custom:true},
+  {id:"transport",icon:"🚛",name:"Transportation Cost",cat:"Logistics",desc:"Route-based freight per piece",color:"#f59e0b"},
+  {id:"packaging",icon:"📦",name:"Packaging Cost",cat:"Logistics",desc:"Primary + secondary + tertiary",color:"#10b981"},
+  {id:"landed",icon:"🌏",name:"Landed Cost (Import)",cat:"Logistics",desc:"FOB → CIF → Landed with duties",color:"#06b6d4"},
+  {id:"inventory",icon:"📊",name:"Inventory Carrying",cat:"Logistics",desc:"True cost of holding stock",color:"#f472b6"},
+  {id:"capex",icon:"🏗️",name:"Capex / MHR",cat:"Capital",desc:"Machine investment → ₹/hour rate",color:"#8b5cf6"},
+  {id:"make-buy",icon:"⚖️",name:"Make vs Buy",cat:"Capital",desc:"Insource eval with payback",color:"#ec4899"},
+  {id:"epc",icon:"🏗️",name:"EPC Project Costing",cat:"Capital",desc:"E+P+C project estimation",color:"#0891b2"},
+  {id:"tco",icon:"💰",name:"Total Cost of Ownership",cat:"Benchmarking",desc:"Beyond unit price — true cost",color:"#f43f5e"},
+  {id:"cbs",icon:"📋",name:"CBS Analyzer",cat:"Benchmarking",desc:"Validate supplier breakdowns",color:"#14b8a6"},
+  {id:"commodity",icon:"📈",name:"Commodity Index Pricing",cat:"Benchmarking",desc:"Auto price from indices",color:"#eab308"},
+  {id:"vave",icon:"🔄",name:"VaVe Impact Model",cat:"Benchmarking",desc:"Value engineering savings",color:"#6366f1"},
+];
+
+// ─── EBOOKS ───
+const EBOOKS=[
+  {id:1,title:"How to Build and Run a Cost Reduction Program",sub:"From Idea to Execution",bg:"#0f2744",accent:"#f59e0b",pattern:"circles",pages:58,tag:"BESTSELLER"},
+  {id:2,title:"How to Do Category Management",sub:"From Segmentation to Strategy",bg:"#0c3332",accent:"#f97316",pattern:"hexagons",pages:52,tag:"NEW"},
+  {id:3,title:"How to Build Supply Chain Resilience",sub:"The Risk Mapping Playbook",bg:"#2d1647",accent:"#a78bfa",pattern:"diamonds",pages:48,tag:""},
+  {id:4,title:"How to Do Should-Cost / Zero-Based Costing",sub:"The Negotiator's Analytical Weapon",bg:"#1a1a2e",accent:"#2d7ff9",pattern:"grid",pages:55,tag:"POPULAR"},
+  {id:5,title:"How to Do Strategic Sourcing",sub:"The 7-Step Process Simplified",bg:"#1c2833",accent:"#10b981",pattern:"waves",pages:46,tag:""},
+  {id:6,title:"How to Build a Savings Tracking & Validation Framework",sub:"Measure What Matters",bg:"#3b1323",accent:"#f43f5e",pattern:"dots",pages:42,tag:""},
+  {id:7,title:"How to Build a Supplier Risk Assessment Framework",sub:"Identify, Assess, Mitigate",bg:"#1a2a1a",accent:"#22c55e",pattern:"triangles",pages:44,tag:""},
+  {id:8,title:"How to Lead a Procurement Transformation",sub:"Change Management for CPOs",bg:"#2a1f0f",accent:"#eab308",pattern:"lines",pages:50,tag:""},
+  {id:9,title:"How to Build a Supplier Performance Measurement System",sub:"Scorecards That Drive Results",bg:"#0f1a2e",accent:"#06b6d4",pattern:"squares",pages:47,tag:""},
+  {id:10,title:"How to Do a Spend Analysis That Finds Real Money",sub:"Data to Decisions",bg:"#1f0f2e",accent:"#8b5cf6",pattern:"zigzag",pages:51,tag:"NEW"},
+];
+
+// ─── EBOOK PREVIEWS (module level) ───
+const EBOOK_PREVIEWS={
+  1:{toc:["Ch 1: The 100-Day Framework","Ch 2: Savings Identification — 12 Proven Levers","Ch 3: Building Your Pipeline Tracker","Ch 4: Cross-Functional Buy-In","Ch 5: Supplier Negotiation Playbook","Ch 6: Savings Validation with Finance","Ch 7: Sustaining Gains — Year 2+","Templates & Checklists"],
+    sample:"Chapter 1: The 100-Day Framework\n\nEvery cost reduction program fails or succeeds in the first 100 days. Not because the ideas are wrong — but because the execution rhythm isn't established early enough.\n\nHere's the framework we've used to deliver ₹40+ crore in validated savings across 3 manufacturing plants:\n\nPhase 1 (Day 1-30): Data & Quick Wins\n• Extract 24-month PO data from ERP\n• Run Pareto analysis — top 20 suppliers = 80% spend\n• Identify 5 quick wins (price corrections, duplicate suppliers, payment term fixes)\n• Target: ₹2-3 Cr in quick savings to build credibility\n\nPhase 2 (Day 31-60): Deep Dive & Strategy\n• Category segmentation — Kraljic matrix for top 15 categories\n• Should-cost models for top 10 high-spend items\n• Launch 3 competitive RFQs for overpriced categories..."},
+  2:{toc:["Ch 1: Why Category Management Matters","Ch 2: Spend Segmentation — The Kraljic Matrix","Ch 3: Category Strategy Templates","Ch 4: Supplier Market Analysis","Ch 5: Negotiation by Category Type","Ch 6: Category Performance Metrics","Ch 7: Building a Category Council","Appendix: 15 Category Templates"],
+    sample:"Chapter 2: Spend Segmentation — The Kraljic Matrix\n\nBefore you can manage categories, you must segment them. The Kraljic Matrix remains the gold standard — but most procurement teams apply it wrong.\n\nThe two axes:\n• X-axis: Supply Risk (single source? imported? long lead time? quality critical?)\n• Y-axis: Profit Impact (annual spend value, impact on product cost)\n\nThis creates 4 quadrants:\n1. Strategic (High Risk + High Impact): Steel, aluminum, motors\n   → Long-term partnerships, joint cost reduction\n2. Leverage (Low Risk + High Impact): Packaging, fasteners, paints\n   → Competitive bidding, volume consolidation\n3. Bottleneck (High Risk + Low Impact): Special coatings, rare components\n   → Secure supply, develop alternatives\n4. Routine (Low Risk + Low Impact): Office supplies, MRO\n   → Automate, catalog buying, P-cards..."},
+  3:{toc:["Ch 1: Why Supply Chains Break","Ch 2: Risk Mapping Methodology","Ch 3: Supplier Financial Health Assessment","Ch 4: Geographic Risk Analysis","Ch 5: Dual Sourcing Strategy","Ch 6: Inventory Buffer Calculations","Ch 7: Crisis Response Playbook","Risk Assessment Templates"],
+    sample:"Chapter 1: Why Supply Chains Break\n\nIn 2020, a major bicycle manufacturer's supply chain faced 3 simultaneous disruptions: COVID lockdowns stopped manufacturing, steel prices spiked 40%, and Chinese component imports were delayed by 8 weeks.\n\nThe lesson wasn't that disruptions happen — it's that 78% of single-sourced items had no backup plan.\n\nThis book gives you the framework to:\n• Map every supplier by risk category (financial, geographic, concentration)\n• Build a 'Risk Score' for each supply line (we use a 1-100 scale)\n• Create automatic triggers: when Risk Score > 70, launch dual-sourcing\n• Calculate the RIGHT inventory buffer — not gut feel, but math-based..."},
+  4:{toc:["Ch 1: What is Zero-Based Costing?","Ch 2: Material Cost Build-Up","Ch 3: Process Costing & Machine Hour Rates","Ch 4: Overhead Allocation Methods","Ch 5: Profit Margin Benchmarks by Industry","Ch 6: Should-Cost vs Supplier Quote","Ch 7: Negotiation Using Should-Cost Data","ZBC Templates & MHR Database"],
+    sample:"Chapter 3: Process Costing & Machine Hour Rates\n\nThe biggest gap in most should-cost models is process costing. Procurement teams know material costs well — but conversion cost is a black box.\n\nHere's how to build a Machine Hour Rate (MHR) from scratch:\n\nMHR = (Depreciation + Power + Operator + Consumables + Maintenance) / Available Hours\n\nExample: CNC VMC (Vertical Machining Center) in Rajkot:\n• Machine Cost: Rs 35 lakhs, Life: 10 years → Depreciation: Rs 350/day\n• Power: 15 kW x Rs 9/unit x 8 hrs = Rs 1,080/day\n• Operator: Rs 18,000/month / 25 days = Rs 720/day\n• Consumables + Maintenance: Rs 250/day\n• Available: 7.5 productive hours/day\n\nMHR = (350+1080+720+250) / 7.5 = Rs 320/hour\n\nNow compare this with supplier's claimed Rs 500/hour..."},
+  5:{toc:["Ch 1: Strategic Sourcing vs Traditional Buying","Ch 2: Step 1 — Spend Analysis","Ch 3: Step 2 — Supply Market Analysis","Ch 4: Step 3 — Develop Strategy","Ch 5: Step 4 — RFQ & Evaluation","Ch 6: Step 5 — Negotiate & Award","Ch 7: Step 6 — Implement & Monitor","Sourcing Templates Pack"],
+    sample:"Chapter 1: Strategic Sourcing vs Traditional Buying\n\nTraditional buying: Supplier sends quote → you negotiate 5% → place PO → repeat.\n\nStrategic sourcing: Understand total cost → map supply market → develop category strategy → structured RFQ → data-driven negotiation → performance management.\n\nThe difference in outcomes is massive:\n• Traditional: 3-5% annual cost reduction\n• Strategic: 8-15% first year, 3-5% sustained\n\nHere's a real example from bicycle manufacturing:\nItem: Steel tubes (ERW, 25.4mm OD)\nOld approach: Annual negotiation with 2 suppliers → 3% reduction\nStrategic approach: Mapped 12 tube mills across India, created TCO model including freight + rejection + inventory cost, ran structured RFQ with 6 suppliers → 14% total cost reduction + improved delivery..."},
+  6:{toc:["Ch 1: Why Savings Tracking Fails","Ch 2: Hard vs Soft Savings — Definitions","Ch 3: Building the Savings Tracker","Ch 4: Validation Methodology","Ch 5: Finance Sign-Off Process","Ch 6: Reporting to the Board","Ch 7: Common Pitfalls & How to Avoid Them","Tracker Templates"],
+    sample:"Chapter 1: Why Savings Tracking Fails\n\nThe #1 reason CPOs lose credibility: claiming Rs 50 Cr savings while finance reports procurement costs went UP.\n\nThis happens because of 3 deadly mistakes:\n\n1. Using budget as baseline (instead of last actual price)\n   Wrong: 'Budget was Rs 100, I bought at Rs 95, savings = Rs 5'\n   Right: 'Last PO was Rs 98, I bought at Rs 95, savings = Rs 3'\n\n2. Double-counting across initiatives\n   Buyer A claims Rs 2L saving on steel. Buyer B claims Rs 1.5L on the same steel for same supplier — different plant.\n\n3. Not differentiating hard vs soft savings\n   Hard: Shows in P&L (price reduction on existing item)\n   Soft: Cost avoidance (rejected a 10% increase, got 3%)\n   Both matter — but report them SEPARATELY..."},
+  7:{toc:["Ch 1: Why Supplier Risk Matters Now","Ch 2: The Risk Assessment Framework","Ch 3: Financial Health Indicators","Ch 4: Operational Risk Scoring","Ch 5: Concentration Risk Analysis","Ch 6: Mitigation Strategies","Ch 7: Monitoring & Early Warning","Risk Scorecard Templates"],
+    sample:"Chapter 2: The Risk Assessment Framework\n\nWe use a 5-dimension scoring model that any procurement team can implement in 2 weeks:\n\nDimension 1: Financial Health (25 points)\n• Revenue trend (growing/stable/declining): 0-10\n• Credit rating or payment behavior: 0-10\n• Dependency on our business (>30% = risk): 0-5\n\nDimension 2: Supply Concentration (25 points)\n• Single source = 25 (critical risk)\n• Dual source = 15\n• Multi source = 5\n\nDimension 3: Geographic Risk (20 points)\n• Same city as our plant: 5 | Same state: 10 | Different state: 15 | International: 20\n\nRisk Score > 70: Immediate dual-sourcing action needed\nRisk Score 50-70: Monitor monthly, develop backup\nRisk Score < 50: Normal management..."},
+  8:{toc:["Ch 1: The Case for Transformation","Ch 2: Maturity Assessment — Where Are You?","Ch 3: The 5-Stage Transformation Roadmap","Ch 4: Technology Selection (ERP, P2P, Analytics)","Ch 5: Team Building & Capability Development","Ch 6: Stakeholder Management","Ch 7: Measuring Transformation Success","Transformation Toolkit"],
+    sample:"Chapter 3: The 5-Stage Transformation Roadmap\n\nStage 1 — Foundation (Month 1-3)\n• Clean master data (supplier codes, material groups)\n• Establish spend visibility (complete spend cube)\n• Set up savings tracking methodology\n• Quick wins: consolidate tail spend, fix maverick buying\n\nStage 2 — Process (Month 4-6)\n• Implement category management for top 10 categories\n• Launch should-cost program for high-spend items\n• Standardize RFQ process with evaluation templates\n• Build supplier scorecard system\n\nStage 3 — Technology (Month 7-12)\n• Deploy procurement analytics tool (like CostLens)\n• Automate routine buying (catalogs, auto-PO)\n• Implement contract management system\n\nStage 4 — Excellence (Year 2)..."},
+  9:{toc:["Ch 1: Why Measure Supplier Performance?","Ch 2: The QCDD Framework","Ch 3: Quality Metrics — PPM, Rejection Rate","Ch 4: Cost Metrics — YoY Price Trend","Ch 5: Delivery Metrics — OTIF, Lead Time","Ch 6: Development — Innovation Score","Ch 7: Scorecard Implementation Guide","Scorecard Excel Templates"],
+    sample:"Chapter 2: The QCDD Framework\n\nWe recommend the QCDD model — Quality, Cost, Delivery, Development — weighted by category:\n\nFor Critical Components (e.g., motors, PCBs):\n• Quality: 40% | Cost: 20% | Delivery: 30% | Development: 10%\n\nFor Commodity Items (e.g., fasteners, packaging):\n• Quality: 20% | Cost: 40% | Delivery: 30% | Development: 10%\n\nScoring each dimension (0-100):\n\nQuality Score:\n• PPM < 500 = 100 points\n• PPM 500-1000 = 80 points\n• PPM 1000-3000 = 60 points\n• PPM > 3000 = 30 points\n\nOverall Score = (Q x 0.4) + (C x 0.2) + (D x 0.3) + (Dev x 0.1)\n\nScore > 85: Preferred supplier — grow business\nScore 70-85: Approved — maintain\nScore < 70: Probation — improvement plan needed..."},
+  10:{toc:["Ch 1: What is Spend Analysis?","Ch 2: Data Collection — ERP Exports","Ch 3: Data Cleansing — The 80% Effort","Ch 4: Classification & Taxonomy","Ch 5: Pareto Analysis — Finding the Money","Ch 6: Savings Identification Levers","Ch 7: Presenting to Management","Spend Analysis Templates"],
+    sample:"Chapter 5: Pareto Analysis — Finding the Money\n\nThe Pareto principle in procurement is brutal: 15-20% of your suppliers control 75-80% of your spend. Yet most procurement teams spread effort equally across all suppliers.\n\nHere's the analysis framework:\n\nStep 1: Rank suppliers by annual spend (descending)\nStep 2: Calculate cumulative % of total spend\nStep 3: Segment:\n• A-class: Top suppliers covering 80% spend (usually 15-20% of suppliers)\n• B-class: Next 15% spend (usually 30% of suppliers)\n• C-class: Last 5% spend (usually 50%+ of suppliers)\n\nReal example from a Rs 300 Cr annual spend:\n• 23 suppliers (out of 450) = Rs 240 Cr (80%)\n• 135 suppliers = Rs 45 Cr (15%)\n• 292 suppliers = Rs 15 Cr (5%) — tail spend, consolidation opportunity\n\nImmediate actions:\n• A-class: Should-cost + strategic negotiation\n• B-class: Competitive RFQ + consolidation\n• C-class: Catalog buying, auto-PO, P-cards..."}
+};
+
+// ─── ANALYSIS REPORTS ───
+const REPORTS=[
+  {id:"spend",icon:"🔍",name:"Spend Analysis",desc:"Classify, segment, and find savings opportunities in your procurement spend data",credits:3,expertPrice:"₹9,999",turnaround:"24-48 hrs",
+    dataNeeded:["PO data export from ERP (SAP/Oracle/Tally) — minimum 12 months","Required columns: PO number, PO date, supplier name, material/item description, quantity, unit price, total value, plant/location","Optional: material group, buyer name, cost center, GRN date, payment date","Formats accepted: Excel (.xlsx), CSV (.csv)"],
+    sampleInsights:["Total spend breakdown by supplier, category, plant, and time period","Pareto analysis: top 20% suppliers covering 80% spend","Maverick spend identification (off-contract purchases)","Supplier consolidation opportunities","Category-wise savings potential with recommended levers","Tail spend analysis — fragmented spend that can be consolidated"],
+    sampleReport:{summary:["Total addressable spend: ₹312 Cr across 847 suppliers and 14 categories","Top 23 suppliers (5%) account for ₹241 Cr (77.2%) — classic Pareto","Steel & Tubes category alone: ₹89 Cr (28.5%), dominated by 3 suppliers — negotiation leverage exists","Maverick spend identified: ₹18.7 Cr (6%) purchases without contracts or outside approved vendor list","Tail spend: 412 suppliers (49%) contribute only ₹15.6 Cr (5%) — consolidation opportunity","Estimated savings potential: ₹24–38 Cr (7.7%–12.2%) across 6 levers"],metrics:[{m:"Total Spend Analyzed",v:"₹312 Cr",t:"stable"},{m:"Active Suppliers",v:"847",t:"up"},{m:"Avg. Order Value",v:"₹3.68L",t:"down"},{m:"Maverick Spend %",v:"6.0%",t:"up"},{m:"Single Source Items",v:"34",t:"up"},{m:"Savings Potential",v:"₹24-38 Cr",t:"down"}],findings:[{f:"Steel tubes: paying ₹72.5/kg vs market ₹67.3/kg — 7.2% premium on ₹42 Cr spend",i:"₹3.02 Cr",a:"Trigger competitive RFQ with 3 qualified alternates"},{f:"Packaging: 6 suppliers doing identical work — consolidate to top 2",i:"₹1.85 Cr",a:"Volume consolidation + annual contract"},{f:"Bearings: switched from SKF to local in 2023, rejection PPM up 340% — hidden cost ₹28L/yr",i:"₹0.28 Cr",a:"Revert to SKF for critical applications, keep local for non-critical"}]},
+    help:{when:"Use when you need a comprehensive view of where your money goes — for annual procurement strategy, new CPO onboarding, board presentations, or identifying quick-win savings. Run at least once a year, ideally quarterly.",howTo:["Export PO data from your ERP (SAP: ME2M/ME2N, Oracle: PO reports, Tally: purchase register)","Ensure minimum 12 months of data for meaningful trends","Include all columns available — more data = better analysis","Upload the file and add any notes (e.g., exclude inter-company, specific plants only)","AI will auto-classify spend into categories and generate insights"],output:["Executive summary with top findings","Spend by supplier (Pareto chart)","Category taxonomy with classification","Top 10 savings opportunities ranked by impact","Maverick and tail spend identification","Recommended next steps with timeline"],tips:["Clean supplier names before uploading — 'TATA STEEL' vs 'Tata Steel Ltd' should be one entity","12 months minimum, 24 months ideal for trend analysis","Exclude capital purchases if you want only operational spend","A good spend analysis typically finds 8-15% savings potential"]}},
+  {id:"price-variance",icon:"📉",name:"Price Variance Report",desc:"Track price changes across suppliers, materials, and periods — find who's charging more",credits:2,expertPrice:"₹7,999",turnaround:"24 hrs",
+    dataNeeded:["GRN (Goods Receipt) or PO data with historical pricing — minimum 6 months","Required columns: material/item code, material description, supplier name, PO date/GRN date, quantity, unit price","Optional: plant, material group, currency, UOM","Two periods to compare (e.g., H1 vs H2, or YoY)"],
+    sampleInsights:["Item-wise price movement (increase/decrease/stable)","Supplier-wise price variance for same items","Price trend charts for top-spend materials","Inflation-adjusted vs actual price changes","Commodity index correlation (steel, aluminum, polymer)","Red flag items: price increases above commodity movement"],
+    sampleReport:{summary:["Analyzed 2,847 line items across 234 suppliers — H1 vs H2 FY24","Price increases: 38% of items went up (avg +6.8%), 22% decreased, 40% stable","Top 20 items by ₹ impact drive ₹8.4 Cr of total ₹11.2 Cr variance","5 suppliers gave increases >12% without commodity justification — ₹3.1 Cr overcharge","Steel prices rose 4.2% (SIAM index) but 14 suppliers charged 8–15% increase — ₹2.8 Cr gap","Payment term erosion: 8 suppliers shifted from 60-day to 45-day — working capital impact ₹1.2 Cr"],metrics:[{m:"Items Analyzed",v:"2,847",t:"stable"},{m:"Net Price Impact",v:"+₹11.2 Cr",t:"up"},{m:"Unjustified Increases",v:"₹3.1 Cr",t:"up"},{m:"Items with ↑ >10%",v:"186",t:"up"},{m:"Savings Recovery Target",v:"₹4.8 Cr",t:"down"},{m:"Commodity Correlation",v:"62%",t:"stable"}],findings:[{f:"HR Coil: Tata Steel +8.2% vs SIAM index +4.1% — excess charge on ₹18 Cr spend",i:"₹0.74 Cr",a:"Negotiate back to index-linked formula"},{f:"Aluminum ingots: 3 suppliers, price spread 14% for same grade — lowest not getting most volume",i:"₹0.52 Cr",a:"Shift 60% volume to L1 supplier"},{f:"Fasteners: 23 items show >15% increase — no commodity justification, pure margin expansion",i:"₹0.38 Cr",a:"Issue show-cause, demand rollback to H1 prices"}]},
+    help:{when:"Use before annual price negotiations, after budget reviews, or when suppliers request price increases. Also useful for validating procurement team's claimed savings.",howTo:["Export GRN data for two periods you want to compare","Ensure same UOM and currency across periods","Include material codes for accurate matching","Upload and specify base period vs current period in notes"],output:["Price movement summary (% items up/down/stable)","Top 20 items by value impact of price change","Supplier scorecard showing who gave increases vs reductions","Commodity correlation analysis","Actionable list of items for immediate price correction"],tips:["Always compare like-for-like: same spec, same UOM, same supplier","Price increases without commodity justification = negotiation opportunity","Focus on top 50 items by spend — they drive 80% of variance impact"]}},
+  {id:"inventory-health",icon:"📦",name:"Inventory Health Analysis",desc:"Aging analysis, NMS identification, turnover ratios, and liquidation planning",credits:2,expertPrice:"₹9,999",turnaround:"24-48 hrs",
+    dataNeeded:["Stock/inventory report from ERP with aging data","Required columns: material code, description, current stock qty, stock value (₹), last receipt date, last issue date","Optional: material group, plant/warehouse, reorder level, safety stock, average monthly consumption","ABC classification data if available"],
+    sampleInsights:["Inventory aging buckets: 0-30, 30-90, 90-180, 180-365, >365 days","Non-moving stock (NMS) identification with value","Slow-moving stock analysis with consumption trends","Inventory turnover ratio by category","ABC-XYZ classification matrix","Liquidation plan with recovery estimates for NMS"],
+    sampleReport:{summary:["Total inventory: ₹48.3 Cr across 6,241 SKUs in 2 warehouses","Non-moving stock (>12 months): ₹12.8 Cr (26.5%) — 1,847 SKUs with zero consumption","Slow-moving (6-12 months): ₹8.4 Cr — potential excess of ₹5.1 Cr above safety stock","Inventory turnover: 4.2x overall vs industry benchmark 6-8x — ₹18 Cr excess working capital locked","A-class items (₹38.6 Cr, 80%): turnover 5.8x — acceptable. C-class (₹4.8 Cr, 10%): turnover 1.2x — problem","Liquidation potential: ₹3.8–5.2 Cr recoverable from NMS (30-40% of book value)"],metrics:[{m:"Total Inventory Value",v:"₹48.3 Cr",t:"up"},{m:"NMS Value (>12m)",v:"₹12.8 Cr",t:"up"},{m:"Inventory Turnover",v:"4.2x",t:"down"},{m:"Excess over 3-month",v:"₹23.1 Cr",t:"up"},{m:"Provision Required",v:"₹6.4 Cr",t:"up"},{m:"Liquidation Recovery",v:"₹3.8-5.2 Cr",t:"down"}],findings:[{f:"E-bike components (discontinued HNF model): ₹4.2 Cr dead stock — no consumption since Aug 2023",i:"₹4.2 Cr",a:"Immediate liquidation: approach HNF dealers, export lots, scrap auction"},{f:"Bearings over-ordered: 18-month stock vs 3-month policy, 42 SKUs",i:"₹1.8 Cr",a:"Freeze POs, consume down to 3-month level"},{f:"Packaging materials aging: ₹2.1 Cr corrugated boxes >6 months — degradation risk",i:"₹2.1 Cr",a:"FIFO enforcement, use oldest stock first in next production run"}]},
+    help:{when:"Use for quarterly inventory reviews, working capital optimization, warehouse cleanup drives, or when CFO questions high inventory levels. Critical during year-end for provision calculations.",howTo:["Export current stock report with aging from ERP","Include last receipt and last issue dates — these determine aging","Add monthly consumption data if available for turnover calculation","Upload and mention any exclusions (e.g., exclude project materials)"],output:["Inventory health dashboard with aging distribution","NMS list with value, last movement date, and recommended action (scrap/liquidate/return)","Turnover ratio by category with benchmarks","Excess stock analysis (current stock vs 3-month requirement)","Working capital opportunity quantified in ₹"],tips:["Stock with no movement >12 months should be provisioned at 50-100%","Good inventory turnover for manufacturing: 6-8x for RM, 8-12x for components","NMS liquidation typically recovers 15-30% of book value","Run this analysis monthly for top 50 items by value"]}},
+  {id:"supplier-scorecard",icon:"⭐",name:"Supplier Performance Scorecard",desc:"Quality, delivery, cost, and responsiveness scoring across your supply base",credits:2,expertPrice:"₹7,999",turnaround:"24 hrs",
+    dataNeeded:["Quality data: rejection/inspection reports — supplier name, material, qty inspected, qty rejected, rejection reason","Delivery data: PO vs GRN dates — PO number, supplier, promised delivery date, actual delivery date","Cost data: price variance or savings data by supplier","Optional: supplier response time data, complaint resolution data, audit scores"],
+    sampleInsights:["Overall supplier ranking with composite score","Quality scorecard: PPM levels, rejection trends, top defect types","Delivery scorecard: OTIF%, lead time adherence, early/late distribution","Cost scorecard: price competitiveness, year-on-year price trend","Risk assessment: single-source items, supplier concentration","Action plan: develop, maintain, phase-out recommendations"],
+    sampleReport:{summary:["Evaluated 48 active suppliers across Quality (40%), Delivery (30%), Cost (20%), Responsiveness (10%)","Green (≥75): 18 suppliers (37.5%) — maintain & reward with volume preference","Amber (50-74): 22 suppliers (45.8%) — development plans needed within 90 days","Red (<50): 8 suppliers (16.7%) — immediate corrective action, 2 recommended for phase-out","Best performer: Tata Steel — composite 92/100 (Quality 95, Delivery 88, Cost 85, Response 98)","Worst performer: Sharma Enterprises — composite 31/100 (Quality 22, Delivery 38, Cost 45, Response 18)"],metrics:[{m:"Avg Quality PPM",v:"1,240",t:"down"},{m:"OTIF Rate (Overall)",v:"78.3%",t:"up"},{m:"Suppliers >95% OTIF",v:"12 (25%)",t:"stable"},{m:"Avg Response Time",v:"3.2 days",t:"down"},{m:"Phase-out Candidates",v:"2",t:"stable"},{m:"Development Priority",v:"8 suppliers",t:"up"}],findings:[{f:"Top 5 suppliers by quality: Tata, SKF India, Munjal Showa, LGB Forge, Endurance — all <200 PPM",i:"Best Practice",a:"Increase share of business for these suppliers"},{f:"Delivery bottleneck: 14 suppliers below 70% OTIF — causing ₹2.8 Cr in line stoppage costs",i:"₹2.8 Cr",a:"Implement vendor-managed inventory for top 5 offenders"},{f:"Sharma Enterprises: 4,800 PPM rejection, 42% OTIF, 12-day avg response — clear phase-out",i:"₹0.45 Cr",a:"Qualify alternate within 60 days, begin volume migration"}]},
+    help:{when:"Use for quarterly business reviews (QBRs) with suppliers, annual vendor rationalization, new supplier approval decisions, or building a preferred supplier list.",howTo:["Export quality inspection data (ideally 6-12 months)","Export PO-to-GRN delivery performance data","Add any price comparison or savings tracking data","Upload all files together with notes on which supplier(s) to focus on"],output:["Composite supplier scorecard (quality 40% + delivery 30% + cost 20% + responsiveness 10%)","Supplier ranking with color-coded performance bands (Green/Amber/Red)","Trend analysis showing improvement or deterioration","Specific action items per supplier","Recommended supplier development priorities"],tips:["Weight quality highest (40%) — a cheap supplier with high rejection is expensive","OTIF target should be 95%+; PPM target depends on industry (automotive <100, general engineering <500)","Include responsiveness: how fast they resolve complaints, submit quotes, attend to issues","Run quarterly; share results with suppliers — transparency drives improvement"]}},
+  {id:"category-opportunity",icon:"🎯",name:"Category Opportunity Analysis",desc:"Strategic assessment of procurement categories to identify and prioritize savings levers",credits:3,expertPrice:"₹12,999",turnaround:"48 hrs",
+    dataNeeded:["Spend data by category (12 months minimum)","Supplier count and concentration per category","Current contract status (spot buy vs annual contract vs long-term)","Optional: market intelligence, commodity trends, import vs local mix","Any existing category strategies or savings targets"],
+    sampleInsights:["Kraljic matrix positioning for each category","Savings potential by lever: consolidation, negotiation, specification change, alternate sourcing","Supply market assessment: competitive vs monopolistic","Quick wins (<3 months) vs structural initiatives (3-12 months)","Category prioritization matrix: savings potential vs ease of capture","Recommended sourcing strategy per category"],
+    sampleReport:{summary:["Analyzed 14 procurement categories totaling ₹312 Cr annual spend","Strategic (High Risk + High Impact): Steel ₹89 Cr, Aluminum ₹34 Cr — long-term partnerships needed","Leverage (Low Risk + High Impact): Packaging ₹28 Cr, Fasteners ₹18 Cr — competitive bidding opportunity","Top 5 categories offer ₹18.5 Cr savings potential (5.9% of spend) across 7 levers","Quick wins (next 90 days): ₹6.2 Cr from 4 initiatives — no capex, no spec change required","Structural savings (3-12 months): ₹12.3 Cr from VaVe, dual sourcing, and import substitution"],metrics:[{m:"Categories Analyzed",v:"14",t:"stable"},{m:"Total Spend",v:"₹312 Cr",t:"stable"},{m:"Savings Identified",v:"₹18.5 Cr",t:"down"},{m:"Quick Wins",v:"₹6.2 Cr",t:"down"},{m:"Avg Suppliers/Cat",v:"12.4",t:"stable"},{m:"Single-Source Categories",v:"3",t:"up"}],findings:[{f:"Packaging: 6 suppliers, no annual contract, spot buying — immediate consolidation to top 2 saves 12%",i:"₹3.36 Cr",a:"Issue consolidated annual RFQ within 30 days"},{f:"Castings: import from China vs local — 22% cost gap, quality comparable after qualification",i:"₹2.8 Cr",a:"Qualify 2 Chinese foundries for non-critical castings"},{f:"Rubber parts: spec over-engineered for 60% of items — grade downgrade saves 15%",i:"₹1.2 Cr",a:"VaVe workshop with engineering team"}]},
+    help:{when:"Use when building annual procurement strategy, starting a cost reduction program, or onboarding into a new procurement role. Best done annually with quarterly refresh.",howTo:["Prepare spend data summarized by category with supplier details","Note current sourcing approach for each category","Include any market context: are prices rising/falling, new suppliers available?","Upload and specify your top priority categories if any"],output:["Category portfolio map (Kraljic matrix)","Ranked opportunity list with savings estimate and timeline","Recommended lever for each category","Implementation roadmap: quick wins → structural → transformational","Resource requirement estimate"],tips:["Categories with 3+ suppliers and no annual contract = immediate negotiation opportunity","Single-source categories need dual-sourcing strategy before price negotiation","Specification rationalization often yields more than pure price negotiation","Focus on top 15-20 categories — they typically cover 80% of spend"]}},
+  {id:"cost-reduction-tracker",icon:"📋",name:"Cost Reduction Pipeline Tracker",desc:"Track, validate, and report savings initiatives across all procurement levers",credits:2,expertPrice:"₹9,999",turnaround:"24-48 hrs",
+    dataNeeded:["List of cost reduction initiatives with status","Required: initiative name, category, lever type, target savings (₹), actual savings (₹), status (identified/in-progress/implemented/validated)","Optional: owner, start date, completion date, implementation notes","Historical savings data for trend analysis"],
+    sampleInsights:["Pipeline health: identified vs implemented vs validated savings","Conversion rate: what % of identified savings actually get captured","Lever-wise contribution: which levers deliver most savings","Aging analysis: initiatives stuck in pipeline >3 months","Forecast vs actual savings gap analysis","Team/buyer-wise performance on savings delivery"],
+    sampleReport:{summary:["Pipeline: 42 initiatives worth ₹28.4 Cr identified — ₹16.2 Cr implemented — ₹11.8 Cr validated by finance","Conversion rate: 57% from identified to implemented (target 60%) — 73% from implemented to validated","Top lever: Competitive bidding delivered ₹4.8 Cr (41% of validated) — strongest performing lever","8 initiatives stuck >90 days in 'In Progress' — worth ₹3.2 Cr — management intervention needed","YTD actual: ₹11.8 Cr vs target ₹15 Cr — 79% achievement, need ₹3.2 Cr in remaining quarter","Buyer performance: Rajesh leading at ₹3.4 Cr, 3 buyers below 50% of individual targets"],metrics:[{m:"Pipeline Value",v:"₹28.4 Cr",t:"stable"},{m:"Validated Savings",v:"₹11.8 Cr",t:"down"},{m:"Target Achievement",v:"79%",t:"up"},{m:"Conversion Rate",v:"57%",t:"stable"},{m:"Stuck Initiatives",v:"8",t:"up"},{m:"Avg Time to Close",v:"68 days",t:"down"}],findings:[{f:"Competitive bidding: highest conversion (72%) and fastest cycle (45 days avg) — scale this lever",i:"₹4.8 Cr",a:"Mandate competitive bidding for all renewals >₹10L"},{f:"VaVe initiatives: 6 identified, only 1 implemented — engineering team bottleneck",i:"₹2.1 Cr stuck",a:"Weekly VaVe review with engineering head, set 30-day approval SLA"},{f:"3 buyers have zero validated savings YTD — need performance improvement plans",i:"₹1.8 Cr gap",a:"Assign specific initiatives with 30-day milestones"}]},
+    help:{when:"Use for monthly/quarterly savings reviews with management, MD presentations, procurement team performance assessment, or annual planning.",howTo:["Maintain a tracker with all cost reduction initiatives","Include both target and actual savings with clear status","Upload the tracker file — AI will analyze pipeline health and gaps","Add notes on any blocked initiatives or management decisions needed"],output:["Executive dashboard: target vs actual vs validated savings","Pipeline funnel visualization","Lever-wise savings contribution chart","Aging report for stuck initiatives","Forecast for remaining year","Recommendations to accelerate pipeline"],tips:["Only count 'validated' savings (confirmed by finance) in your reported number","A healthy pipeline has 3x identified vs target — because only 30-40% converts","Track cost avoidance separately from cost reduction — both matter but report them differently","Monthly review cadence keeps the pipeline moving — quarterly is too slow"]}},
+  {id:"savings-validation",icon:"✅",name:"Procurement Savings Validation",desc:"CFO-ready savings report with P&L mapping, methodology validation, and audit trail",credits:3,expertPrice:"₹11,999",turnaround:"48 hrs",
+    dataNeeded:["Claimed savings list with supporting data","Required: item/category, old price, new price, volume, savings calculation, savings type (hard/soft/avoidance)","Baseline reference: what was the price/cost before the initiative","Finance-approved methodology or company savings policy if available","PO/contract data to verify new prices are actually being used"],
+    sampleInsights:["Validated savings vs claimed savings (typically 60-80% validation rate)","Hard savings (P&L impact) vs soft savings vs cost avoidance — clearly separated","Methodology audit: are savings calculated correctly","Double-counting identification","Annualized run-rate vs one-time savings","P&L line item mapping for finance reporting"],
+    sampleReport:{summary:["Claimed savings: ₹18.4 Cr — Validated: ₹12.6 Cr (68.5% validation rate)","Hard savings (P&L): ₹8.2 Cr | Soft savings: ₹2.8 Cr | Cost avoidance: ₹1.6 Cr","3 initiatives had methodology errors: used budget as baseline instead of last actual price — ₹2.4 Cr overclaimed","2 instances of double-counting detected: same price reduction counted by 2 buyers — ₹0.8 Cr removed","Annualized run-rate: ₹14.1 Cr (sustainable) vs one-time savings: ₹1.2 Cr (non-recurring)","Finance sign-off ready: ₹8.2 Cr hard savings mapped to 4 P&L line items for board reporting"],metrics:[{m:"Claimed Savings",v:"₹18.4 Cr",t:"stable"},{m:"Validated Amount",v:"₹12.6 Cr",t:"down"},{m:"Validation Rate",v:"68.5%",t:"stable"},{m:"Hard Savings",v:"₹8.2 Cr",t:"down"},{m:"Double-Counting Found",v:"₹0.8 Cr",t:"up"},{m:"Methodology Errors",v:"3 cases",t:"up"}],findings:[{f:"Steel negotiation: claimed ₹3.2 Cr — validated ₹2.8 Cr (baseline used was Q1 spike, not avg)",i:"₹0.4 Cr overclaim",a:"Use 6-month rolling average as baseline going forward"},{f:"Packaging consolidation: claimed ₹1.8 Cr — fully validated ₹1.8 Cr — excellent documentation",i:"₹1.8 Cr confirmed",a:"Use this as best-practice template for other initiatives"},{f:"Import substitution: claimed ₹2.1 Cr — actual PO prices show only ₹1.4 Cr realized",i:"₹0.7 Cr gap",a:"Investigate why negotiated price not flowing through to POs"}]},
+    help:{when:"Use before presenting savings to CFO/MD, during annual procurement performance review, or when finance team challenges your savings claims. Critical for CPO credibility.",howTo:["Compile all claimed savings with calculation methodology","Include baseline data (old prices) and new data (negotiated prices)","Upload PO data to verify new prices are actually being transacted","Note any assumptions or methodology used"],output:["Validated savings report — CFO-ready format","Hard savings confirmed with P&L mapping","Methodology review with flags for questionable calculations","Double-counting and overlap identification","Confidence rating for each savings claim","Executive summary suitable for board presentation"],tips:["Finance respects hard savings only — always lead with P&L-impacting numbers","Common validation failures: using budget as baseline instead of last actual price, counting one-time savings as recurring, double-counting across initiatives","A 70% validation rate is considered good — below 50% indicates methodology problems","Get finance to agree on methodology BEFORE you start tracking — avoid arguments later"]}},
+  {id:"supplier-risk",icon:"⚠️",name:"Supplier Risk Heat Map",desc:"Identify single-source, geographic, financial, and operational risks across your supply base",credits:2,expertPrice:"₹7,999",turnaround:"24 hrs",
+    dataNeeded:["Supplier master data: supplier name, location (city/state/country), materials supplied, annual spend","Supply data: which items have single vs dual vs multi source","Optional: supplier financial data (turnover, credit rating), audit scores, past disruption history","Critical item list: items where supply disruption would stop production"],
+    sampleInsights:["Single-source risk map: items dependent on one supplier","Geographic concentration risk: what if Pune floods or China imposes export controls","Spend concentration: top 5 suppliers covering >60% of spend","Financial risk indicators: small suppliers with high dependency on your business","Criticality matrix: high-risk items × high-impact items","Mitigation plan with specific actions and timelines"],
+    sampleReport:{summary:["Assessed 234 suppliers — 34 items (₹42 Cr spend) are single-sourced with no backup","Geographic concentration: 68% of spend comes from 3 clusters — Ludhiana, Pune, Rajkot","Top 5 suppliers control 61% of spend (₹190 Cr) — Tata Steel alone is 22% (₹68 Cr)","12 small suppliers (<₹5 Cr turnover) supply critical items — your business is >40% of their revenue","Critical risk items: 8 items where supply disruption = production stop within 48 hours","Estimated annual risk exposure: ₹18–24 Cr from likely disruption scenarios"],metrics:[{m:"Single-Source Items",v:"34",t:"up"},{m:"Single-Source Spend",v:"₹42 Cr",t:"up"},{m:"Geographic Risk Score",v:"7.2/10",t:"up"},{m:"Supplier Concentration",v:"61% in top 5",t:"stable"},{m:"Critical Items at Risk",v:"8",t:"up"},{m:"Annual Risk Exposure",v:"₹18-24 Cr",t:"up"}],findings:[{f:"Motor controller PCBs: single source from Shenzhen, 14-week lead time — any disruption stops e-bike production",i:"₹8.2 Cr revenue risk",a:"Qualify domestic alternate (Bengaluru/Chennai) within 90 days"},{f:"CRS tubes: 2 suppliers but both in Ludhiana — geographic concentration for ₹28 Cr spend",i:"₹4.5 Cr production risk",a:"Add Pune/Nashik supplier for 30% of volume"},{f:"Sharma Metalworks: ₹1.2 Cr spend, their turnover only ₹2.8 Cr — your business is 43% of theirs",i:"₹1.2 Cr supply risk",a:"Develop second source, monitor financial health quarterly"}]},
+    help:{when:"Use annually for strategic risk assessment, after any supply disruption event, during new product launches (to ensure supply security), or for management risk reporting.",howTo:["Export supplier master with location and spend data","Identify single-source items from your BOM or approved vendor list","Add any known risk information (financial health, past issues, audit results)","Upload all data — AI will build the risk matrix and heat map"],output:["Risk heat map: likelihood × impact matrix","Single-source items list with alternative supplier recommendations","Geographic concentration analysis with map","Financial risk flags for vulnerable suppliers","Prioritized mitigation plan","Estimated business impact if top risks materialize"],tips:["Any item with single source AND >₹50L annual spend needs immediate dual-sourcing action","Geographic risk: if >30% of spend is from one region, you're exposed","Supplier dependency: if your business is >25% of a supplier's revenue, they're financially vulnerable to losing you but also dependent — manage carefully","Update risk assessment after every disruption — don't wait for annual review"]}},
+];
+
+// ─── AI COMMERCIAL TOOLS ───
+const AI_TOOLS=[
+  {id:"price-check",icon:"💲",name:"Price Reasonableness Check",desc:"Is this quotation price fair? AI benchmarks instantly.",credits:1,color:"#10b981",gradient:"linear-gradient(90deg,#10b981,#3b82f6)",
+    inputType:"form",fields:[
+      {k:"itemName",l:"Item / Part Name",ph:"e.g. CNC Motor Housing, Cycle Frame, Bearing Cap"},
+      {k:"material",l:"Material & Spec",ph:"e.g. Aluminum 6061, EN8 Steel, PP Copolymer"},
+      {k:"weight",l:"Weight / Size",ph:"e.g. 2.3 kg, 450mm length, Ø80mm"},
+      {k:"process",l:"Manufacturing Process",ph:"e.g. CNC Machining, Investment Casting, Injection Moulding"},
+      {k:"quotedPrice",l:"Quoted Price (₹)",ph:"e.g. 480",t:"number"},
+      {k:"qty",l:"Annual Quantity",ph:"e.g. 5000",t:"number"},
+      {k:"supplier",l:"Supplier Location",ph:"e.g. Ludhiana, Rajkot, Pune"}
+    ],
+    prompt:(f)=>`You are CostLens AI — a procurement price analyst for Indian manufacturing. Analyze this quotation:
+Item: ${f.itemName||"N/A"}
+Material: ${f.material||"N/A"}
+Weight/Size: ${f.weight||"N/A"}
+Process: ${f.process||"N/A"}
+Quoted Price: ₹${f.quotedPrice||"N/A"}
+Annual Qty: ${f.qty||"N/A"}
+Supplier Location: ${f.supplier||"N/A"}
+
+Provide a thorough price reasonableness analysis. RESPOND ONLY WITH JSON:
+{"verdict":"HIGH|FAIR|LOW|COMPETITIVE","confidence":"High|Medium|Low","quotedPrice":${f.quotedPrice||0},"fairRangeLow":0,"fairRangeHigh":0,"percentDeviation":0,"costBreakdown":[{"component":"Raw Material","estimated":0,"pct":0},{"component":"Processing","estimated":0,"pct":0},{"component":"Overheads","estimated":0,"pct":0},{"component":"Profit","estimated":0,"pct":0},{"component":"Logistics","estimated":0,"pct":0}],"benchmarks":[{"source":"description","price":0}],"negotiationLeverage":["point 1","point 2","point 3"],"recommendedAction":"What to do next — 2-3 sentences","savingsIfNegotiated":0}`},
+  {id:"contract-analyzer",icon:"📜",name:"Contract Clause Analyzer",desc:"Upload supplier contract → AI flags risky, missing, and favorable clauses",credits:3,color:"#f43f5e",gradient:"linear-gradient(90deg,#f43f5e,#f59e0b)",
+    inputType:"file",fileLabel:"Upload Supplier Contract (PDF/Word/Image)",
+    prompt:(notes)=>`You are CostLens AI — a procurement contract analyst for Indian manufacturing. Analyze this supplier contract thoroughly. Identify every clause and categorize it.
+
+Additional context: ${notes||"None"}
+
+RESPOND ONLY WITH JSON:
+{"contractSummary":"2-3 sentence overview of the contract","parties":{"buyer":"","supplier":"","effectiveDate":"","tenure":""},"favorable":[{"clause":"clause title","section":"section ref","detail":"why this is good for buyer","strength":"Strong|Moderate"}],"risky":[{"clause":"clause title","section":"section ref","risk":"specific risk to buyer","severity":"High|Medium|Low","recommendation":"what to change"}],"missing":[{"clause":"clause title","importance":"Critical|Important|Good to Have","recommendation":"suggested language or protection","risk":"what happens without this"}],"autoRenewalTrap":false,"priceRevisionClause":"description or 'Missing'","ldClause":"description or 'Missing'","terminationClause":"description or 'Missing'","overallRisk":"High|Medium|Low","topActions":["action 1","action 2","action 3"],"estimatedLegalValue":"₹ value of risk prevented by fixing these issues"}`},
+  {id:"rfq-comparator",icon:"📊",name:"RFQ Response Comparator",desc:"Upload 2-5 quotations → Normalized comparison matrix with ranking",credits:3,color:"#6366f1",gradient:"linear-gradient(90deg,#6366f1,#8b5cf6)",
+    inputType:"file",fileLabel:"Upload 2-5 Supplier Quotations (PDF/Excel/Images)",
+    prompt:(notes)=>`You are CostLens AI — a procurement RFQ analyst for Indian manufacturing. Analyze these supplier quotations and create a normalized techno-commercial comparison.
+
+Additional context: ${notes||"None"}
+
+RESPOND ONLY WITH JSON:
+{"rfqSummary":"2-3 sentence overview","itemDescription":"what is being quoted","vendors":[{"name":"Vendor Name","location":"City","unitPrice":0,"moq":0,"deliveryDays":0,"paymentTerms":"","warranty":"","technicalScore":0,"commercialScore":0,"overallScore":0,"strengths":[""],"weaknesses":[""],"rank":1}],"comparisonMatrix":[{"parameter":"","vendor1":"","vendor2":"","vendor3":"","winner":""}],"recommendation":"Which vendor to select and why — 3-4 sentences","negotiationStrategy":"How to use this comparison to negotiate — 2-3 sentences","savingsPotential":"₹ potential savings by playing vendors against each other","redFlags":["any concerning items across all quotations"]}`},
+  {id:"negotiation-brief",icon:"🎯",name:"Negotiation Prep Brief",desc:"AI strategy brief: leverage, concession plan, talking points, Plan B",credits:2,color:"#f59e0b",gradient:"linear-gradient(90deg,#f59e0b,#10b981)",
+    inputType:"form",fields:[
+      {k:"supplierName",l:"Supplier Name",ph:"e.g. Tata Steel, Rajkot Forging Works"},
+      {k:"category",l:"Category / Items",ph:"e.g. HR Coil Steel, CNC Machined Components"},
+      {k:"annualSpend",l:"Annual Spend (₹)",ph:"e.g. 12,00,00,000 (12 Cr)",t:"number"},
+      {k:"currentTerms",l:"Current Terms",ph:"e.g. Net 30, quarterly revision, ex-works Jamshedpur"},
+      {k:"issueContext",l:"Negotiation Context / Issue",ph:"e.g. Supplier asking 8% increase citing raw material costs"},
+      {k:"relationship",l:"Relationship Duration",ph:"e.g. 5 years, sole supplier for this category"},
+      {k:"alternatives",l:"Known Alternatives",ph:"e.g. JSW Steel, SAIL (tested), imported option from Vietnam"}
+    ],
+    prompt:(f)=>`You are CostLens AI — a McKinsey-grade procurement strategist for Indian manufacturing. Prepare a negotiation strategy brief.
+
+Supplier: ${f.supplierName||"N/A"}
+Category: ${f.category||"N/A"}
+Annual Spend: ₹${f.annualSpend||"N/A"}
+Current Terms: ${f.currentTerms||"N/A"}
+Context: ${f.issueContext||"N/A"}
+Relationship: ${f.relationship||"N/A"}
+Alternatives: ${f.alternatives||"N/A"}
+
+RESPOND ONLY WITH JSON:
+{"briefTitle":"Negotiation Brief: [Supplier] — [Category]","situationAssessment":"3-4 sentence assessment of buyer's position","leveragePoints":[{"point":"","strength":"Strong|Medium|Weak","howToUse":"specific tactic"}],"openingPosition":"What to open with — 2 sentences","targetOutcome":"Realistic best outcome — 2 sentences","walkAwayPoint":"When to walk away — 1-2 sentences","concessionPlan":[{"give":"what you can concede","get":"what you get in return","sequence":1}],"talkingPoints":["specific statement with data backing"],"counterArguments":[{"theyWillSay":"","youRespond":""}],"redLines":["things NOT to concede"],"planB":"If negotiation fails — 2-3 sentences on alternative strategy","meetingScript":"Opening 3-4 sentences to say in the meeting","expectedSavings":"₹ quantified expected outcome","timeline":"Recommended negotiation timeline"}`},
+  {id:"quote-analysis",icon:"📑",name:"Vendor Quotation Analysis",desc:"Upload any quotation (with/without drawing & specs) — AI benchmarks price, flags gaps, and gives negotiation ammunition",credits:2,color:"#0891b2",gradient:"linear-gradient(90deg,#0891b2,#6366f1)",
+    inputType:"file",fileLabel:"Upload Vendor Quotation + Drawing/Specs (PDF/Excel/Image — up to 5 files)",
+    prompt:(notes)=>`You are CostLens AI — a senior procurement cost engineer and quotation analyst for Indian manufacturing with 25+ years experience. You analyze vendor quotations for any type of product — machined components, fabricated parts, castings, forgings, stampings, assemblies, plastic parts, rubber parts, electrical items, packaging, raw materials, bought-outs, services, tooling, or any other procurement item.
+
+Analyze the uploaded quotation(s) thoroughly. If a drawing or specification is included, use it to validate the quotation against technical requirements. If no drawing is provided, analyze purely from the commercial quotation.
+
+Additional context from buyer: ${notes||"None provided"}
+
+YOUR ANALYSIS MUST COVER:
+1. Extract every line item, price, quantity, and terms from the quotation
+2. For each item: estimate a fair/benchmark price range based on Indian manufacturing cost fundamentals (material + conversion + overhead + margin)
+3. Identify overpriced items, underpriced items (quality risk), missing items, and hidden costs
+4. Flag commercial term gaps: payment, delivery, warranty, LD, price validity, tooling, packing, freight
+5. If drawing/specs provided: check if quotation covers all specs, surface treatments, tolerances, testing requirements
+6. Provide specific negotiation points with ₹ savings potential
+
+RESPOND ONLY WITH JSON:
+{"quotationSummary":"3-4 sentence overview — supplier, items, total value, first impression","supplierName":"extracted from quotation","quotationDate":"extracted or N/A","quotationValidity":"extracted or N/A","currency":"INR|USD|EUR","lineItems":[{"sno":1,"item":"item description","quotedQty":0,"uom":"","quotedUnitPrice":0,"quotedTotal":0,"fairPriceLow":0,"fairPriceHigh":0,"verdict":"HIGH|FAIR|LOW|CHECK","deviation":"% above or below fair range","remarks":"why this is priced as assessed — specific cost drivers"}],"totalQuoted":0,"totalFairLow":0,"totalFairHigh":0,"overallVerdict":"OVERPRICED|FAIR|COMPETITIVE|MIXED","savingsPotential":"₹ total if negotiated to fair range","costBreakdownEstimate":[{"component":"Raw Material","pct":0},{"component":"Processing/Conversion","pct":0},{"component":"Overheads & Admin","pct":0},{"component":"Profit Margin","pct":0},{"component":"Packing & Freight","pct":0}],"overpriceFlags":[{"item":"","issue":"specific reason why overpriced","suggestedAction":""}],"missingFromQuotation":["items or terms not covered but should be"],"commercialGaps":[{"term":"e.g. Payment Terms","status":"Missing|Unfavorable|OK","recommendation":""}],"specComplianceNotes":["only if drawing/specs provided — compliance observations"],"negotiationStrategy":{"openingStatement":"What to say to supplier in first meeting — 2-3 sentences","topLeveragePoints":["specific data-backed negotiation point"],"itemsToChallenge":["specific items to push back on with reasoning"],"concessions":"What you can offer in return — volume commitment, longer contract, faster payment"},"riskFlags":["any quality, delivery, or commercial risks spotted"],"recommendedNextSteps":["action 1","action 2","action 3"]}`},
+  {id:"service-comparator",icon:"🔧",name:"AMC / Service Quotation Comparator",desc:"Upload RFP/RFQ + service quotations → AI normalizes scope, compares pricing, and recommends L1 with negotiation tips",credits:3,color:"#7c3aed",gradient:"linear-gradient(90deg,#7c3aed,#2563eb)",
+    inputType:"file",fileLabel:"Upload RFP/RFQ document + All vendor quotations (PDF/Excel/Image — up to 10 files)",
+    prompt:(notes)=>`You are CostLens AI — a senior procurement and contracts specialist with deep expertise in service procurement, AMC contracts, facility management, IT services, maintenance contracts, security services, housekeeping, manpower supply, and all types of service-based procurement in Indian manufacturing and corporate environments.
+
+Analyze the uploaded documents which include the buyer's RFP/RFQ/Scope of Work and multiple vendor quotations for a service contract.
+
+Additional context from buyer: ${notes||"None provided"}
+
+YOUR ANALYSIS MUST COVER:
+1. SCOPE ALIGNMENT: Compare each vendor's quoted scope against the RFP/RFQ requirements. Identify scope gaps (items in RFP not quoted), scope additions (items quoted but not asked), and scope ambiguities.
+2. COST NORMALIZATION: Normalize all vendor prices to a common basis — same scope, same period, same unit. Break down into: manpower cost, material/consumable cost, equipment/AMC cost, management fee/margin, taxes/statutory. If vendors quote differently (lumpsum vs itemized, monthly vs annual, per-person vs per-sqft), normalize to enable fair comparison.
+3. MANPOWER ANALYSIS: If applicable, extract headcount, skill levels, salary/wage assumptions, statutory compliance (PF, ESI, bonus, gratuity, leave), management fee %, and compare across vendors. Flag any vendor quoting below statutory minimum wages.
+4. COMMERCIAL TERMS: Compare payment terms, escalation clauses, penalty/LD clauses, contract period, exit clause, performance guarantee, insurance coverage, replacement guarantees.
+5. COMPLIANCE CHECK: Flag vendors missing mandatory compliance — CLRA license, PF/ESI registration, GST, insurance, safety certifications, ISO certification if required.
+6. L1 ASSESSMENT: Identify L1 (lowest) and assess if L1 is genuinely competitive or artificially low (underbidding risks — low wages, missing scope, no statutory compliance). Provide a QUALITY-ADJUSTED L1 recommendation.
+7. NEGOTIATION STRATEGY: Specific tips to negotiate with L1 and L2, leveraging gaps found in the analysis.
+
+RESPOND ONLY WITH JSON:
+{"serviceSummary":"3-4 sentence overview of the RFP and quotations received","serviceType":"AMC|Housekeeping|Security|IT Support|Manpower Supply|Facility Mgmt|Other","contractPeriod":"extracted from RFP","rfpScope":["key scope item 1","key scope item 2"],"vendors":[{"name":"Vendor Name","quotedTotal":0,"normalizedTotal":0,"currency":"INR","period":"monthly|annual","rank":1,"scorecard":{"scopeCoverage":0,"commercialScore":0,"complianceScore":0,"overallScore":0},"manpower":{"headcount":0,"avgCTC":0,"statutoryCompliant":true,"minWageCompliant":true},"strengths":[""],"weaknesses":[""],"scopeGaps":["items in RFP but not quoted"],"scopeAdditions":["items quoted but not in RFP"],"redFlags":[""]}],"costComparison":[{"component":"","vendor1":0,"vendor2":0,"vendor3":0,"benchmark":""}],"commercialComparison":[{"parameter":"","vendor1":"","vendor2":"","vendor3":"","rfpRequirement":"","winner":""}],"complianceMatrix":[{"requirement":"","vendor1":"OK|MISSING|PARTIAL","vendor2":"OK|MISSING|PARTIAL","vendor3":"OK|MISSING|PARTIAL"}],"l1Assessment":{"l1Vendor":"","l1Total":0,"l2Vendor":"","l2Total":0,"priceDifference":"₹ or %","isL1Genuine":true,"l1Risks":[""],"qualityAdjustedL1":"vendor name","recommendation":"2-3 sentence recommendation"},"negotiationTips":{"withL1":["specific point"],"withL2":["specific point"],"generalLeverage":["market leverage"],"expectedSavings":"₹ amount","suggestedCounterOffer":"what to propose to L1"},"riskFlags":[""],"recommendedNextSteps":["action 1","action 2","action 3"]}`}
+];
+
+// ─── MODULE CONFIGS (compact) ───
+const MCFG={
+// Transport module → custom TransportCostModule (AI-powered)
+"landed":{
+  sampleOutput:{title:"Servo Motor | China FOB $48 | HS 8501.10",rows:[{l:"FOB Price (₹84/USD)",v:"₹4,032"},{l:"Ocean Freight (LCL)",v:"₹280"},{l:"Marine Insurance (0.3%)",v:"₹13"},{l:"BCD (7.5%)",v:"₹324"},{l:"SWS (10% of BCD)",v:"₹32"},{l:"IGST (18%)",v:"₹841"},{l:"Port + CHA Charges",v:"₹150"},{l:"Inland Transport",v:"₹85"},{l:"LC Charges (1.5%)",v:"₹60"},{l:"Currency Hedge (2%)",v:"₹81"}],totals:[{l:"Total Landed Cost",v:"₹5,898",hl:1},{l:"Import Premium over FOB",v:"+46.3%"},{l:"IGST Credit Available",v:"₹841"}]},
+  aiHint:"Upload a commercial invoice, customs bill of entry, or shipping bill",
+  help:{when:"Use when importing components or materials — to calculate the true landed cost in ₹ including freight, insurance, customs duty, IGST, port charges, and finance costs. Critical for make-vs-buy decisions comparing local vs import sources.",howTo:["Enter FOB price per piece in ₹ (convert from USD/EUR using current exchange rate)","Select origin country, HS code, and Incoterm (FOB/CIF/EXW)","Add each import cost element: ocean freight, insurance (0.3% CIF), BCD (check tariff schedule), SWS (10% of BCD), IGST (18% on assessable value)","Include port charges, CHA/broker fees, inland transport, LC/bank charges, and currency hedge cost","For CIF terms, freight and insurance are already in the price — don't double-count"],output:["Complete landed cost per piece in ₹","Breakdown by base price, freight, insurance, duties, taxes, handling, and finance","Duty structure showing BCD, SWS, and IGST separately","Total import premium over FOB price (as %)"],tips:["BCD rates change in Union Budget — always verify current rates","IGST is recoverable as input credit — factor this in your TCO comparison","LC charges are typically 1.5% of value — use bank guarantee if possible","Currency hedge cost of 2-3% is often forgotten — it's real money"]},
+  fields:[{k:"fobPrice",l:"FOB Price (₹)",t:"number"},{k:"originCountry",l:"Origin",ph:"China, Japan..."},{k:"hsCode",l:"HS Code",ph:"8714.91"},{k:"incoterm",l:"Incoterm",t:"select",opts:["FOB","CIF","EXW","DDP"]},{k:"quantity",l:"Qty",t:"number"},{k:"pieceWeightKg",l:"Wt(kg)",t:"number"}],
+  cols:[{key:"item",label:"Element",w:160},{key:"description",label:"Basis",w:200},{key:"amount",label:"₹/pc",type:"number",w:100,step:"0.1",def:0},{key:"category",label:"Type",type:"select",w:90,options:["base","freight","insurance","duty","tax","handling","finance","other"],def:"duty"}],
+  addLabel:"Add Element",sectionTitle:"🌏 Import Cost Stack",
+  calcFn:ops=>{let t=0;ops.forEach(o=>t+=Number(o.amount)||0);return{total:t}},
+  barFn:r=>[{l:"Landed/Pc",v:"₹"+r.total.toFixed(2),hl:1}],resultLabel:"Landed ₹/Piece",
+  templates:{
+    t1:{label:"🇯🇵 Servo Motor (Japan)",cfg:{fobPrice:850,originCountry:"Japan",hsCode:"8501.52",incoterm:"FOB",quantity:10000,pieceWeightKg:0.25},ops:[{item:"FOB Price",amount:850,category:"base"},{item:"Ocean Freight",amount:2.0,category:"freight"},{item:"Insurance",amount:2.56,category:"insurance"},{item:"BCD 15%",amount:128.18,category:"duty"},{item:"SWS 10%",amount:12.82,category:"duty"},{item:"IGST 18%",amount:178,category:"tax"},{item:"Port+Broker",amount:5,category:"handling"},{item:"Inland Transport",amount:4,category:"freight"},{item:"LC Charges",amount:12.75,category:"finance"},{item:"Currency Hedge",amount:17,category:"finance"}]},
+    blank:{label:"📝 Custom",cfg:{fobPrice:0,originCountry:"",hsCode:"",incoterm:"FOB",quantity:1,pieceWeightKg:0},ops:[]},
+  },
+  prompt:`Import logistics expert India. Extract landed cost elements from document. Generate JSON with costSheet array. Each item must have: item (element name), description (calculation basis), amount (₹ per piece), category (one of: base, freight, insurance, duty, tax, handling, finance, other). RESPOND ONLY VALID JSON: {"costSheet":[{"item":"str","description":"str","amount":0,"category":"duty"}]}`,
+},
+"inventory":{
+  sampleOutput:{title:"Steel Inventory | ₹85 Lakhs | 4 months holding",rows:[{l:"Cost of Capital (12%)",v:"₹3.40L/mo"},{l:"Warehousing (1.5%)",v:"₹1.28L/mo"},{l:"Insurance (0.3%)",v:"₹0.26L/mo"},{l:"Obsolescence Risk (0.8%)",v:"₹0.68L/mo"},{l:"Handling & Shrinkage (0.4%)",v:"₹0.34L/mo"}],totals:[{l:"Monthly Carrying Cost",v:"₹5.95 Lakhs"},{l:"Total for 4 Months",v:"₹23.8 Lakhs",hl:1},{l:"Annualized Carrying %",v:"28.0% of inventory value"}]},
+  aiHint:"Upload an inventory aging report or stock statement",
+  help:{when:"Use when you need to quantify the true cost of holding inventory — for working capital reviews, slow/non-moving stock liquidation plans, safety stock optimization, or justifying JIT/VMI programs to management.",howTo:["Enter total inventory value in ₹ Lakhs and holding period in months","Enter your cost of capital (weighted avg cost of funds — typically 10-14% for Indian manufacturing)","Add carrying cost elements: cost of capital, storage/warehousing, insurance, obsolescence risk, handling, shrinkage","For each element, enter monthly % of inventory value and equivalent ₹ Lakhs/month","Obsolescence is the hidden killer — use 0.5-2% per month depending on product lifecycle"],output:["Monthly carrying cost in ₹ Lakhs","Total carrying cost for the holding period","Annualized carrying cost as % of inventory value — benchmark is 18-30%"],tips:["Most CFOs use only cost of capital (12%) — real carrying cost is 22-30% when you add everything","Obsolescence risk for electronics/auto parts: 1-2%/month; for steel/fasteners: 0.3-0.5%/month","Use this output to justify investment in demand planning or VMI programs","Non-moving stock >12 months should be written off or liquidated at scrap value"]},
+  fields:[{k:"inventoryValueLakh",l:"Inventory (₹ Lakhs)",t:"number"},{k:"holdingMonths",l:"Holding (months)",t:"number"},{k:"costOfCapitalPct",l:"Cost of Capital %",t:"number"}],
+  cols:[{key:"item",label:"Element",w:160},{key:"description",label:"Basis",w:200},{key:"monthlyPct",label:"Mo%",type:"number",w:70,step:"0.01",def:0},{key:"monthlyAmt",label:"₹L/mo",type:"number",w:80,step:"0.1",def:0},{key:"category",label:"Type",type:"select",w:100,options:["capital","storage","insurance","obsolescence","handling","shrinkage","other"],def:"capital"}],
+  addLabel:"Add Element",sectionTitle:"📊 Carrying Cost Elements",
+  calcFn:(ops,cfg)=>{let m=0;ops.forEach(o=>m+=Number(o.monthlyAmt)||0);const mo=Number(cfg.holdingMonths)||6,inv=Number(cfg.inventoryValueLakh)||0;return{total:m*mo,monthlyTotal:m,holdingMonths:mo,annualPct:inv>0?(m*12/inv*100):0}},
+  barFn:r=>[{l:"Monthly",v:"₹"+r.monthlyTotal.toFixed(1)+"L"},{l:"Total("+r.holdingMonths+"mo)",v:"₹"+r.total.toFixed(1)+"L",hl:1},{l:"Annual%",v:r.annualPct.toFixed(1)+"%"}],
+  resultLabel:"Carrying Cost(₹L)",resultValFn:r=>r.total.toFixed(1)+"L",
+  templates:{
+    t1:{label:"🏭 ₹1Cr Stock",cfg:{inventoryValueLakh:100,holdingMonths:6,costOfCapitalPct:12},ops:[{item:"Cost of Capital",monthlyPct:1.0,monthlyAmt:1.0,category:"capital"},{item:"Storage",monthlyPct:0.15,monthlyAmt:0.15,category:"storage"},{item:"Insurance",monthlyPct:0.08,monthlyAmt:0.08,category:"insurance"},{item:"Obsolescence",monthlyPct:1.0,monthlyAmt:1.0,category:"obsolescence"},{item:"Handling",monthlyPct:0.07,monthlyAmt:0.07,category:"handling"}]},
+    blank:{label:"📝 Custom",cfg:{inventoryValueLakh:0,holdingMonths:6,costOfCapitalPct:12},ops:[]},
+  },
+  prompt:`Supply chain finance expert. Extract inventory carrying cost elements from document. Generate JSON with costSheet array. Each item must have: item (element name), description (basis), monthlyPct (monthly % of inventory value), monthlyAmt (₹ Lakhs per month), category (one of: capital, storage, insurance, obsolescence, handling, shrinkage, other). RESPOND ONLY VALID JSON: {"costSheet":[{"item":"str","description":"str","monthlyPct":1.0,"monthlyAmt":1.0,"category":"capital"}]}`,
+},
+"capex":{
+  sampleOutput:{title:"CNC VMC | ₹35 Lakhs | 10yr life | 3-shift",rows:[{l:"Depreciation (SLM)",v:"₹175/hr"},{l:"Power (15kW × ₹9)",v:"₹135/hr"},{l:"Operator Cost",v:"₹90/hr"},{l:"Consumables + Tools",v:"₹45/hr"},{l:"Maintenance (5%)",v:"₹22/hr"},{l:"Space Rental",v:"₹15/hr"}],totals:[{l:"Machine Hour Rate",v:"₹482/hr",hl:1},{l:"Available Hours/Year",v:"6,000 hrs"},{l:"Payback Period",v:"2.8 years"}]},
+  aiHint:"Upload a machine quotation or capex proposal",
+  help:{when:"Use when you need to calculate the true machine hour rate (MHR) — for should-cost models, make-vs-buy analysis, capex proposals to management, or validating supplier machine rates. Every should-cost starts with knowing the correct ₹/hour or ₹/minute for each machine.",howTo:["Enter machine details: name, purchase price (₹ Lakhs), useful life (years)","Enter utilization: hours per day (single shift=8, double=16, triple=22) and working days per year","Enter power consumption (kW) and electricity rate (₹/unit)","Add annual cost elements: depreciation, interest on capital, power, operator wages, maintenance/AMC, consumables (inserts, coolant), floor space cost","Each element in ₹ Lakhs per year — the tool auto-calculates ₹/hour and ₹/minute"],output:["Total annual operating cost in ₹ Lakhs","Machine Hour Rate (₹/hour) — use in should-cost process sheets","₹/minute rate — for quick cycle time costing","Payback period in years"],tips:["Indian manufacturing benchmark MHR: CNC VMC ₹800-1200/hr, CNC Lathe ₹600-900/hr, Press ₹300-500/hr, Welding Robot ₹500-800/hr","Don't forget consumables — cutting inserts alone can be ₹2-3L/year for a VMC","Utilization is king: a machine running 2 shifts has 40% lower MHR than single shift","For supplier negotiation, compare their claimed MHR with your calculated rate"]},
+  fields:[{k:"machineName",l:"Machine",ph:"CNC VMC Fanuc"},{k:"purchasePrice",l:"Price(₹L)",t:"number"},{k:"usefulLife",l:"Life(yr)",t:"number"},{k:"hoursPerDay",l:"Hrs/Day",t:"number"},{k:"daysPerYear",l:"Days/Yr",t:"number"},{k:"powerKw",l:"Power(kW)",t:"number"},{k:"powerRate",l:"₹/unit",t:"number"}],
+  cols:[{key:"item",label:"Element",w:150},{key:"description",label:"Basis",w:200},{key:"amount",label:"₹L/yr",type:"number",w:90,step:"0.1",def:0},{key:"category",label:"Type",type:"select",w:100,options:["depreciation","maintenance","power","operator","consumable","space","other"],def:"depreciation"}],
+  addLabel:"Add Element",sectionTitle:"🏗️ Annual Cost Breakdown",
+  calcFn:(ops,cfg)=>{let a=0;ops.forEach(o=>a+=Number(o.amount)||0);const hrs=(Number(cfg.hoursPerDay)||16)*(Number(cfg.daysPerYear)||300);const mhr=hrs>0?(a*100000/hrs):0;return{total:a,mhr,mhrMin:mhr/60,payback:a>0?(Number(cfg.purchasePrice)||0)/a:0}},
+  barFn:r=>[{l:"Annual",v:"₹"+r.total.toFixed(1)+"L"},{l:"MHR",v:"₹"+r.mhr.toFixed(0)+"/hr",hl:1},{l:"₹/min",v:"₹"+r.mhrMin.toFixed(2)},{l:"Payback",v:r.payback.toFixed(1)+"yr"}],
+  resultLabel:"MHR(₹/hr)",resultValFn:r=>"₹"+r.mhr.toFixed(0),
+  templates:{
+    t1:{label:"⚙️ CNC VMC (₹45L)",cfg:{machineName:"CNC VMC Fanuc",purchasePrice:45,usefulLife:10,hoursPerDay:16,daysPerYear:300,powerKw:15,powerRate:9},ops:[{item:"Depreciation",description:"SLM 10yr",amount:4.5,category:"depreciation"},{item:"Interest",description:"12% avg",amount:2.7,category:"depreciation"},{item:"Power",description:"15kW×16h×300d×₹9",amount:6.48,category:"power"},{item:"Operator",description:"2 shifts",amount:6.0,category:"operator"},{item:"Maintenance",description:"3% AMC",amount:1.35,category:"maintenance"},{item:"Consumables",description:"Inserts,coolant",amount:2.0,category:"consumable"},{item:"Space",description:"100sqft",amount:0.36,category:"space"}]},
+    blank:{label:"📝 Custom",cfg:{machineName:"",purchasePrice:0,usefulLife:10,hoursPerDay:16,daysPerYear:300,powerKw:0,powerRate:9},ops:[]},
+  },
+  prompt:`Manufacturing engineer. Extract machine cost elements from document. Generate JSON with costSheet array. Each item must have: item (cost element name), description (calculation basis), amount (₹ Lakhs per year), category (one of: depreciation, maintenance, power, operator, consumable, space, other). RESPOND ONLY VALID JSON: {"costSheet":[{"item":"str","description":"str","amount":4.5,"category":"depreciation"}]}`,
+},
+"make-buy":{
+  sampleOutput:{title:"Gear Shaft | Make (VMC+Grind) vs Buy (₹380/pc)",rows:[{l:"Make: Raw Material",v:"₹145"},{l:"Make: Machining (12 min)",v:"₹96"},{l:"Make: Grinding (4 min)",v:"₹52"},{l:"Make: OH + Profit (23%)",v:"₹67"},{l:"Buy: Supplier Quote",v:"₹380"},{l:"Buy: Incoming QC",v:"₹8"}],totals:[{l:"Make Cost/Piece",v:"₹360",hl:1},{l:"Buy Cost/Piece",v:"₹388"},{l:"Saving if Make",v:"₹28/pc (7.2%)"},{l:"Capex Payback",v:"1.8 years @ 50K vol"}]},
+  aiHint:"Upload a supplier quotation or in-house cost estimate",
+  help:{when:"Use when evaluating whether to insource a process or component — for vertical integration decisions, new product launches, or when a supplier becomes unreliable. Also use to validate existing outsourcing decisions or justify capex proposals to management.",howTo:["Enter part name, current buy price (₹/piece), annual volume, and evaluation period (years)","Add in-house cost elements: each with capex (₹ Lakhs, one-time) and recurring cost (₹/piece)","Typical elements: machines, tooling, facility modification, raw material, labor, overhead, quality","The tool auto-calculates: amortized capex per piece + recurring = total make cost per piece","Compare with buy price — tool shows payback period automatically"],output:["Make cost per piece (recurring + amortized capex)","Buy cost per piece (current supplier)","Clear MAKE or BUY recommendation","Total capex required (₹ Lakhs)","Payback period in years"],tips:["Include ALL hidden costs of making: quality inspection, rework, scrap, production planning overhead","A payback of <2 years is generally attractive; >4 years is risky","Don't forget opportunity cost — can that capex be used for higher-ROI projects?","Consider strategic factors beyond cost: supply security, IP protection, quality control, flexibility","Include learning curve — first 6 months of insourcing usually has higher rejection rates"]},
+  fields:[{k:"partName",l:"Part",ph:"Motor Housing Welding"},{k:"currentBuyPrice",l:"Buy ₹/pc",t:"number"},{k:"annualVolume",l:"Volume/yr",t:"number"},{k:"evaluationYears",l:"Eval(yr)",t:"number"}],
+  cols:[{key:"item",label:"Element",w:160},{key:"description",label:"Details",w:200},{key:"capexLakh",label:"Capex(₹L)",type:"number",w:80,step:"0.5",def:0},{key:"recurringPerPc",label:"₹/pc",type:"number",w:80,step:"0.1",def:0},{key:"category",label:"Type",type:"select",w:100,options:["machine","tooling","facility","material","labor","overhead","quality","other"],def:"machine"}],
+  addLabel:"Add Element",sectionTitle:"⚖️ In-House Cost Elements",
+  calcFn:(ops,cfg)=>{let cx=0,rc=0;ops.forEach(o=>{cx+=Number(o.capexLakh)||0;rc+=Number(o.recurringPerPc)||0});const v=Number(cfg.annualVolume)||100000,y=Number(cfg.evaluationYears)||5,bp=Number(cfg.currentBuyPrice)||0;const mp=rc+(cx*100000/(v*y));const pb=rc<bp&&v>0?cx*100000/((bp-rc)*v):999;return{total:mp,capex:cx,recurring:rc,makePerPc:mp,buyPerPc:bp,payback:pb,recommendation:mp<bp?"MAKE":"BUY"}},
+  barFn:r=>[{l:"Buy",v:"₹"+r.buyPerPc.toFixed(2)},{l:"Make",v:"₹"+r.makePerPc.toFixed(2),hl:1},{l:"Capex",v:"₹"+r.capex.toFixed(1)+"L"},{l:"Payback",v:r.payback<99?r.payback.toFixed(1)+"yr":"N/A"},{l:"Verdict",v:r.recommendation,hl:1}],
+  resultLabel:"Verdict",resultValFn:r=>r.recommendation,
+  templates:{
+    t1:{label:"🏭 Insource Welding",cfg:{partName:"Housing Welding",currentBuyPrice:85,annualVolume:200000,evaluationYears:5},ops:[{item:"Welding Robots(2)",capexLakh:56,recurringPerPc:0,category:"machine"},{item:"Fixtures",capexLakh:8,recurringPerPc:0,category:"tooling"},{item:"Facility",capexLakh:12,recurringPerPc:0,category:"facility"},{item:"Material",capexLakh:0,recurringPerPc:8.5,category:"material"},{item:"Labor",capexLakh:0,recurringPerPc:18,category:"labor"},{item:"Overhead",capexLakh:0,recurringPerPc:12,category:"overhead"},{item:"Quality",capexLakh:2,recurringPerPc:3,category:"quality"}]},
+    blank:{label:"📝 Custom",cfg:{partName:"",currentBuyPrice:0,annualVolume:100000,evaluationYears:5},ops:[]},
+  },
+  prompt:`Manufacturing strategist. Extract make-vs-buy cost elements from document. Generate JSON with costSheet array. Each item must have: item (element name), description (details), capexLakh (one-time capex in ₹ Lakhs, 0 if recurring only), recurringPerPc (₹ per piece recurring cost), category (one of: machine, tooling, facility, material, labor, overhead, quality, other). RESPOND ONLY VALID JSON: {"costSheet":[{"item":"str","description":"str","capexLakh":0,"recurringPerPc":0,"category":"machine"}]}`,
+},
+"epc":{
+  sampleOutput:{title:"Paint Shop Upgrade | 3 phases",rows:[{l:"Engineering & Design",v:"₹12.5 Lakhs"},{l:"Equipment Procurement",v:"₹68.0 Lakhs"},{l:"Civil & Structural",v:"₹18.5 Lakhs"},{l:"Electrical & Controls",v:"₹14.0 Lakhs"},{l:"Installation & Commissioning",v:"₹8.5 Lakhs"},{l:"Contingency (8%)",v:"₹9.7 Lakhs"}],totals:[{l:"Total Project Cost",v:"₹1.31 Cr",hl:1},{l:"Timeline",v:"16 weeks"},{l:"ROI",v:"22 months payback"}]},
+  aiHint:"Upload a BOQ, project estimate, or EPC tender document",
+  help:{when:"Use when estimating a capital project cost — for power plants, water treatment plants, warehouses, solar farms, chemical plants, or any EPC project. Use during feasibility study, budget approval, tender evaluation, or contractor negotiation.",howTo:["Enter project details: name, type, capacity/size, location, duration in months, and currency unit (₹ Lakhs or ₹ Crores)","Add cost heads row by row: each with description, base amount, and contingency %","Assign each cost head to a phase: engineering, equipment, civil, mechanical, electrical, instrumentation, piping, etc.","Contingency % auto-calculates the 'with contingency' column — typically 3% for well-defined, 5-8% for medium, 10%+ for uncertain scope","Don't forget: site overheads, logistics, taxes/duties, and EPC margin (8-12%)"],output:["Total EPC cost with contingency","E:P:C ratio split — benchmark varies by project type","Phase-wise breakdown (engineering, procurement, construction, indirect, margin)","Base cost vs contingency separately — useful for management presentation"],tips:["Typical E:P:C ratios: Power Plant 5:45:30, Chemical Plant 8:40:32, Warehouse 3:35:42, Solar 2:60:20","Equipment procurement is usually 40-55% of total EPC cost","Always add 5% contingency minimum — even on well-defined scope","Get budget quotes from 3 vendors for major equipment before finalizing estimate","Logistics for ODC (over-dimensional cargo) can be 3-5x normal freight — budget separately"]},
+  fields:[{k:"projectName",l:"Project Name",ph:"Captive Power Plant"},{k:"projectType",l:"Type",t:"select",opts:["Power Plant","Chemical Plant","Water Treatment","Oil & Gas","Steel Plant","Warehouse/Shed","Solar Farm","Other"]},{k:"capacityOrSize",l:"Capacity",ph:"10MW / 5000sqm"},{k:"location",l:"Location",ph:"Jamnagar, Gujarat"},{k:"durationMonths",l:"Duration(mo)",t:"number"},{k:"currency",l:"Unit",t:"select",opts:["₹ Lakhs","₹ Crores"]}],
+  cols:[{key:"item",label:"Cost Head",w:160},{key:"description",label:"Scope",w:200},{key:"amount",label:"Amount",type:"number",w:100,step:"1",def:0},{key:"contingencyPct",label:"Cntg%",type:"number",w:60,step:"1",def:5},{key:"_total",label:"w/Cntg",w:90,computed:r=>(Number(r.amount)||0)*(1+(Number(r.contingencyPct)||0)/100)},{key:"category",label:"Phase",type:"select",w:110,options:["engineering","equipment","bulk_material","civil","mechanical","electrical","instrumentation","piping","insulation_painting","precomm","construction_mgmt","site_overheads","logistics","taxes_duties","margin","other"],def:"equipment"}],
+  addLabel:"Add Cost Head",sectionTitle:"🏗️ EPC Cost Breakdown",
+  calcFn:(ops)=>{let base=0,wc=0;const ph={};ops.forEach(o=>{const a=Number(o.amount)||0,c=a*(1+(Number(o.contingencyPct)||0)/100);base+=a;wc+=c;ph[o.category||"other"]=(ph[o.category||"other"]||0)+c});const eng=ph.engineering||0,equip=(ph.equipment||0)+(ph.bulk_material||0),constr=(ph.civil||0)+(ph.mechanical||0)+(ph.electrical||0)+(ph.instrumentation||0)+(ph.piping||0)+(ph.insulation_painting||0);return{total:wc,totalBase:base,engineering:eng,procurement:equip,construction:constr,ePct:wc>0?(eng/wc*100):0,pPct:wc>0?(equip/wc*100):0,cPct:wc>0?(constr/wc*100):0}},
+  barFn:r=>[{l:"Engg",v:r.engineering.toFixed(1)},{l:"Procure",v:r.procurement.toFixed(1)},{l:"Constr",v:r.construction.toFixed(1)},{l:"Total EPC",v:r.total.toFixed(1),hl:1}],
+  resultLabel:"Total EPC",resultValFn:r=>r.total.toFixed(1),
+  templates:{
+    t1:{label:"⚡ Power Plant 10MW",cfg:{projectName:"Captive Power 10MW",projectType:"Power Plant",capacityOrSize:"10MW Coal",location:"Jharsuguda",durationMonths:24,currency:"₹ Crores"},ops:[{item:"Engineering & PMC",amount:6.3,contingencyPct:5,category:"engineering"},{item:"Boiler Package",amount:28,contingencyPct:5,category:"equipment"},{item:"TG Set",amount:18,contingencyPct:5,category:"equipment"},{item:"Coal Handling",amount:8.5,contingencyPct:8,category:"equipment"},{item:"Ash Handling",amount:4.2,contingencyPct:8,category:"equipment"},{item:"WTP",amount:3.5,contingencyPct:5,category:"equipment"},{item:"Electrical",amount:6.5,contingencyPct:5,category:"electrical"},{item:"Instrumentation",amount:3.8,contingencyPct:5,category:"instrumentation"},{item:"Piping",amount:5.5,contingencyPct:10,category:"piping"},{item:"Civil Works",amount:12,contingencyPct:8,category:"civil"},{item:"Mech Erection",amount:7.5,contingencyPct:8,category:"mechanical"},{item:"Insulation+Paint",amount:2.2,contingencyPct:5,category:"insulation_painting"},{item:"Commissioning",amount:1.8,contingencyPct:10,category:"precomm"},{item:"Site OH",amount:4.3,contingencyPct:5,category:"site_overheads"},{item:"Logistics",amount:2.8,contingencyPct:10,category:"logistics"},{item:"Taxes",amount:8.5,contingencyPct:3,category:"taxes_duties"},{item:"Margin 8%",amount:9.5,contingencyPct:0,category:"margin"}]},
+    t2:{label:"☀️ Solar 5MW",cfg:{projectName:"Solar 5MWp",projectType:"Solar Farm",capacityOrSize:"5MWp DC",location:"Jodhpur",durationMonths:6,currency:"₹ Crores"},ops:[{item:"Engineering",amount:0.25,contingencyPct:5,category:"engineering"},{item:"Solar Modules",amount:9.72,contingencyPct:3,category:"equipment"},{item:"Inverters",amount:1.2,contingencyPct:3,category:"equipment"},{item:"MMS",amount:1.8,contingencyPct:5,category:"equipment"},{item:"Cables+Switchgear",amount:1.4,contingencyPct:5,category:"electrical"},{item:"Transformer",amount:0.65,contingencyPct:5,category:"electrical"},{item:"Civil",amount:1.3,contingencyPct:8,category:"civil"},{item:"Erection",amount:0.6,contingencyPct:8,category:"mechanical"},{item:"SCADA",amount:0.2,contingencyPct:5,category:"instrumentation"},{item:"Logistics",amount:0.45,contingencyPct:5,category:"logistics"},{item:"Taxes",amount:0.8,contingencyPct:3,category:"taxes_duties"},{item:"Margin",amount:1.2,contingencyPct:0,category:"margin"}]},
+    blank:{label:"📝 Custom",cfg:{projectName:"",projectType:"Other",capacityOrSize:"",location:"",durationMonths:12,currency:"₹ Crores"},ops:[]},
+  },
+  prompt:`Senior EPC estimation engineer. Extract project cost elements from document. Generate JSON with costSheet array. Each item must have: item (cost head name), description (scope), amount (base amount), contingencyPct (contingency percentage, typically 3-10), category (one of: engineering, equipment, bulk_material, civil, mechanical, electrical, instrumentation, piping, insulation_painting, precomm, construction_mgmt, site_overheads, logistics, taxes_duties, margin, other). RESPOND ONLY VALID JSON: {"costSheet":[{"item":"str","description":"str","amount":0,"contingencyPct":5,"category":"equipment"}]}`,
+},
+"tco":{
+  sampleOutput:{title:"Supplier A vs B | Hydraulic Cylinder | 5000/yr",rows:[{l:"Unit Price",v:"A: ₹2,400 | B: ₹2,180"},{l:"Freight (per unit)",v:"A: ₹45 | B: ₹120"},{l:"Rejection Cost (PPM)",v:"A: ₹12 | B: ₹48"},{l:"Inventory Carry",v:"A: ₹35 | B: ₹85"},{l:"Payment Terms",v:"A: ₹20 (30d) | B: ₹0 (90d)"},{l:"Line Stoppage Risk",v:"A: ₹5 | B: ₹65"}],totals:[{l:"TCO Supplier A",v:"₹2,517/pc"},{l:"TCO Supplier B",v:"₹2,498/pc",hl:1},{l:"Verdict",v:"B cheaper by ₹19/pc (0.8%) despite higher logistics"}]},
+  aiHint:"Upload supplier quotations to compare TCO across vendors",
+  help:{when:"Use when comparing suppliers who quote different unit prices but have different quality, lead time, logistics, and reliability — the cheapest unit price is rarely the lowest total cost. Essential during sourcing decisions, vendor rationalization, and annual price negotiations.",howTo:["Enter part name, annual volume, and line stoppage cost per hour (ask production — typically ₹25K-1L/hr)","Add each supplier as a row: unit price, rejection %, lead time (days), logistics ₹/piece, payment terms (days), line stoppage hours/year","The tool auto-calculates TCO per piece including: rejection cost, inventory carrying (based on lead time), logistics, payment term benefit/cost, quality cost, and line stoppage impact","More suppliers = better comparison — add 3-5 for best results"],output:["TCO per piece for each supplier — the true cost beyond unit price","Clear winner highlighted with ✅","Side-by-side comparison showing where each supplier wins or loses","The 'cheapest' supplier often turns out most expensive on TCO"],tips:["A supplier with 0.5% rejection at ₹250 often beats one with 3% rejection at ₹230","Lead time drives inventory carrying cost — 21 days vs 7 days = 2-3% cost difference","Payment terms matter: 60 days vs 30 days credit = ~1% price benefit","Line stoppage is the nuclear weapon in TCO — even 4 hours/year at ₹50K/hr = ₹1/piece on 200K volume","Use TCO data in negotiations: show the supplier their TOTAL cost impact, not just unit price"]},
+  fields:[{k:"partName",l:"Part",ph:"Motor Housing"},{k:"annualVolume",l:"Volume/yr",t:"number"},{k:"lineStoppageCostPerHr",l:"Stoppage ₹/hr",t:"number"}],
+  cols:[{key:"supplier",label:"Supplier",w:120},{key:"unitPrice",label:"Unit₹",type:"number",w:70,step:"1",def:0},{key:"rejectionPct",label:"Rej%",type:"number",w:60,step:"0.1",def:1},{key:"leadTimeDays",label:"Lead(d)",type:"number",w:60,step:"1",def:15},{key:"logisticsPerPc",label:"Log₹",type:"number",w:70,step:"0.1",def:2},{key:"paymentDays",label:"Pay(d)",type:"number",w:60,step:"1",def:30},{key:"stoppageHrsYr",label:"Stop(hr)",type:"number",w:60,step:"0.5",def:0}],
+  addLabel:"Add Supplier",sectionTitle:"💰 Supplier Comparison",
+  calcFn:(ops,cfg)=>{const v=Number(cfg.annualVolume)||200000,sc=Number(cfg.lineStoppageCostPerHr)||50000;const res=ops.map(s=>{const u=Number(s.unitPrice)||0,r=(Number(s.rejectionPct)||0)/100,l=Number(s.logisticsPerPc)||0,p=Number(s.paymentDays)||30,st=Number(s.stoppageHrsYr)||0,lt=Number(s.leadTimeDays)||15;const tco=u+l+u*r+u*(lt/365)*0.12-u*(p/365)*0.12+u*0.005+(v>0?st*sc/v:0);return{name:s.supplier||"?",unitPrice:u,tco}});const best=res.reduce((a,b)=>a.tco<b.tco?a:b,{tco:Infinity});return{total:best.tco,suppliers:res,bestSupplier:best.name,bestTco:best.tco}},
+  barFn:r=>r.suppliers?.map(s=>({l:s.name,v:"₹"+s.tco.toFixed(2),hl:s.name===r.bestSupplier}))||[],
+  resultLabel:"Best TCO",resultValFn:r=>"₹"+r.bestTco.toFixed(2)+" ("+r.bestSupplier+")",
+  templates:{
+    t1:{label:"⚙️ 3-Supplier Compare",cfg:{partName:"Motor Housing",annualVolume:200000,lineStoppageCostPerHr:50000},ops:[{supplier:"Vendor A (Pune)",unitPrice:235,rejectionPct:2,leadTimeDays:7,logisticsPerPc:1.5,paymentDays:45,stoppageHrsYr:0},{supplier:"Vendor B (Rajkot)",unitPrice:248,rejectionPct:0.3,leadTimeDays:12,logisticsPerPc:3.2,paymentDays:30,stoppageHrsYr:0},{supplier:"Vendor C (Kolkata)",unitPrice:228,rejectionPct:3.5,leadTimeDays:21,logisticsPerPc:5,paymentDays:60,stoppageHrsYr:4}]},
+    blank:{label:"📝 Custom",cfg:{partName:"",annualVolume:100000,lineStoppageCostPerHr:50000},ops:[]},
+  },
+  prompt:`Procurement analyst. Extract supplier comparison data from document. Generate JSON with costSheet array. Each supplier must have: supplier (vendor name), unitPrice (₹ per piece), rejectionPct (rejection percentage), leadTimeDays (lead time in days), logisticsPerPc (logistics ₹ per piece), paymentDays (payment terms in days), stoppageHrsYr (line stoppage hours per year). RESPOND ONLY VALID JSON: {"costSheet":[{"supplier":"str","unitPrice":0,"rejectionPct":1,"leadTimeDays":15,"logisticsPerPc":2,"paymentDays":30,"stoppageHrsYr":0}]}`,
+},
+"cbs":{
+  sampleOutput:{title:"Die Cast Housing | Supplier CBS vs Should-Cost",rows:[{l:"Raw Material (ADC12)",v:"Quoted: 42% | Fair: 38-40%"},{l:"Conversion (HPDC)",v:"Quoted: 28% | Fair: 22-25%"},{l:"Secondary Ops (CNC)",v:"Quoted: 12% | Fair: 12-14%"},{l:"Overheads",v:"Quoted: 8% | Fair: 10-12%"},{l:"Profit Margin",v:"Quoted: 10% | Fair: 6-8%"}],totals:[{l:"Quoted Price",v:"₹485/pc"},{l:"Fair Price Range",v:"₹410–₹445/pc",hl:1},{l:"Overpriced Items",v:"Conversion (+₹28), Profit (+₹12)"},{l:"Negotiation Target",v:"₹435/pc (10% reduction)"}]},
+  aiHint:"Upload a supplier cost breakdown sheet (CBS) to validate",
+  help:{when:"Use when a supplier submits a cost breakdown and you need to validate it against your benchmarks — during annual price negotiations, new part quotations, or when a supplier requests a price increase. The goal is to find where the supplier has padded their costs.",howTo:["Enter part name and your benchmark overhead% (typically 12-18%) and profit% (5-10%)","Add each cost element from the supplier's breakdown: raw material, bought-out, conversion, overhead, logistics, profit","For each element, enter the supplier's claimed value AND your benchmark value (from should-cost or market data)","The tool auto-calculates variance and flags elements where supplier exceeds benchmark by >10% (red flags)","Focus your negotiation on the red-flag elements — that's where the savings are"],output:["Supplier total vs your benchmark total","Variance in ₹ and % — this is your negotiation space","Number of red flags (elements >10% above benchmark)","Element-wise comparison for line-by-line discussion with supplier"],tips:["Overhead is where most suppliers pad — Indian SMEs claim 25-40%, reality is 12-18%","Profit margins: suppliers claim 3-5% but actual overhead already includes hidden profit","Raw material: verify weight claims against your drawing — suppliers often round up 10-15%","Conversion cost: cross-check cycle times with your should-cost process sheet","A good CBS analysis typically finds 8-15% negotiation space"]},
+  fields:[{k:"partName",l:"Part",ph:"Motor Housing"},{k:"benchOH",l:"Bench OH%",t:"number"},{k:"benchProfit",l:"Bench Profit%",t:"number"}],
+  cols:[{key:"element",label:"Element",w:140},{key:"supplierValue",label:"Supplier₹",type:"number",w:90,step:"0.1",def:0},{key:"benchValue",label:"Bench₹",type:"number",w:90,step:"0.1",def:0},{key:"_var",label:"Var",w:80,computed:r=>(Number(r.supplierValue)||0)-(Number(r.benchValue)||0)},{key:"category",label:"Type",type:"select",w:100,options:["raw_material","conversion","overhead","logistics","profit","other"],def:"raw_material"}],
+  addLabel:"Add Element",sectionTitle:"📋 CBS Validation",
+  calcFn:ops=>{let s=0,b=0;ops.forEach(o=>{s+=Number(o.supplierValue)||0;b+=Number(o.benchValue)||0});return{total:s,supplierTotal:s,benchmarkTotal:b,variance:s-b,variancePct:b>0?((s-b)/b*100):0,redFlags:ops.filter(o=>(Number(o.supplierValue)||0)>(Number(o.benchValue)||0)*1.1).length}},
+  barFn:r=>[{l:"Supplier",v:"₹"+r.supplierTotal.toFixed(2)},{l:"Benchmark",v:"₹"+r.benchmarkTotal.toFixed(2)},{l:"Variance",v:"₹"+r.variance.toFixed(2),hl:1},{l:"Red Flags",v:r.redFlags+""}],
+  resultLabel:"Variance",resultValFn:r=>"₹"+r.variance.toFixed(2)+" ("+r.variancePct.toFixed(1)+"%)",
+  templates:{
+    t1:{label:"⚙️ Housing CBS",cfg:{partName:"Motor Housing",benchOH:15,benchProfit:8},ops:[{element:"Raw Material",supplierValue:165,benchValue:149,category:"raw_material"},{element:"Bought-out",supplierValue:22,benchValue:20,category:"raw_material"},{element:"Conversion",supplierValue:38,benchValue:35,category:"conversion"},{element:"Overhead",supplierValue:52,benchValue:27.6,category:"overhead"},{element:"Logistics",supplierValue:8,benchValue:5,category:"logistics"},{element:"Profit",supplierValue:32,benchValue:18.9,category:"profit"}]},
+    blank:{label:"📝 Custom",cfg:{partName:"",benchOH:15,benchProfit:8},ops:[]},
+  },
+  prompt:`Cost analyst. Extract supplier cost breakdown elements from document. Generate JSON with costSheet array. Each element must have: element (cost element name), supplierValue (supplier's claimed ₹ value), benchValue (your benchmark ₹ value, estimate if not known), category (one of: raw_material, conversion, overhead, logistics, profit, other). RESPOND ONLY VALID JSON: {"costSheet":[{"element":"str","supplierValue":0,"benchValue":0,"category":"raw_material"}]}`,
+},
+"commodity":{
+  sampleOutput:{title:"CRC Steel | SIAM Index | Quarterly Revision",rows:[{l:"Base Price (Apr 2024)",v:"₹68.50/kg"},{l:"SIAM CRC Index (Apr)",v:"105.2"},{l:"SIAM CRC Index (Jul)",v:"112.8"},{l:"Index Change",v:"+7.2%"},{l:"Formula: 60% indexed",v:"60% × 7.2% = 4.32%"},{l:"Revised Price",v:"₹71.46/kg"}],totals:[{l:"Price Change/kg",v:"+₹2.96",hl:1},{l:"Annual Volume (500T)",v:"Impact: ₹14.8 Lakhs"},{l:"Pass-Through",v:"Customer clause: 80% recoverable"}]},
+  aiHint:"Upload commodity price sheets or index data",
+  help:{when:"Use when you need to link supplier prices to commodity indices — for auto price revision mechanisms, raw material escalation/de-escalation clauses, or to demand price reductions when indices fall. Works for any commodity: steel (HRC/CRC), aluminum, copper, zinc, PP, ABS, rubber, etc.",howTo:["Enter part name, current price (₹/piece), base period (when price was last fixed), and current period","Add each raw material component: name, weight% in the part (e.g., steel is 62% of motor housing cost)","Enter the base index value (price when contract was signed) and current index value","The tool calculates index change% for each RM and applies it proportionally to the part price","Only the RM portion of price gets adjusted — conversion cost stays fixed"],output:["Revised price per piece based on index movement","Price change (₹ and %) — positive means price should go up, negative means you demand reduction","RM vs conversion split clearly shown","Use this as data-backed evidence in price revision discussions"],tips:["Steel indices: use JSW/SAIL published HRC/CRC rates; Aluminum: LME + import premium","Always define the index source and formula in your purchase contract","RM typically represents 50-70% of part cost — even a 5% index drop gives 2.5-3.5% price reduction","Update indices monthly or quarterly — don't let suppliers delay price reductions","For multi-RM parts (e.g., steel + rubber + copper), map each component separately"]},
+  fields:[{k:"partName",l:"Part"},{k:"currentPrice",l:"Current₹",t:"number"},{k:"basePeriod",l:"Base Period",ph:"Jan 2025"},{k:"currentPeriod",l:"Current",ph:"Feb 2026"}],
+  cols:[{key:"component",label:"RM",w:140},{key:"weightPct",label:"Wt%",type:"number",w:70,step:"1",def:0},{key:"baseIndex",label:"Base Idx",type:"number",w:80,step:"10",def:100},{key:"currentIndex",label:"Curr Idx",type:"number",w:80,step:"10",def:100},{key:"_change",label:"Chg%",w:70,computed:r=>{const b=Number(r.baseIndex)||100,c=Number(r.currentIndex)||100;return((c-b)/b*100)}},{key:"indexName",label:"Source",w:120}],
+  addLabel:"Add RM",sectionTitle:"📈 RM Index Mapping",
+  calcFn:(ops,cfg)=>{const p=Number(cfg.currentPrice)||0;let tw=0,wc=0;ops.forEach(o=>{const w=Number(o.weightPct)||0,b=Number(o.baseIndex)||100,c=Number(o.currentIndex)||100;tw+=w;wc+=w*((c-b)/b)});const rp=tw/100,rc=wc/100,conv=p*(1-rp),nrm=p*rp*(1+rc),np=conv+nrm;return{total:np,currentPrice:p,newPrice:np,delta:np-p,deltaPct:p>0?((np-p)/p*100):0}},
+  barFn:r=>[{l:"Current",v:"₹"+r.currentPrice.toFixed(2)},{l:"Revised",v:"₹"+r.newPrice.toFixed(2),hl:1},{l:"Change",v:(r.delta>=0?"+":"")+"₹"+r.delta.toFixed(2)}],
+  resultLabel:"Revised Price",
+  templates:{
+    t1:{label:"⚙️ Steel Housing (HRC)",cfg:{partName:"Motor Housing",currentPrice:240,basePeriod:"Jan 2025",currentPeriod:"Feb 2026"},ops:[{component:"HR Coil Steel",weightPct:62,baseIndex:48500,currentIndex:44700,indexName:"JSW HRC"},{component:"ERW Tube",weightPct:8,baseIndex:5200,currentIndex:5400,indexName:"Tube Market"}]},
+    blank:{label:"📝 Custom",cfg:{partName:"",currentPrice:0,basePeriod:"",currentPeriod:""},ops:[]},
+  },
+  prompt:`Commodity pricing expert. Extract raw material index data from document. Generate JSON with costSheet array. Each RM component must have: component (raw material name), weightPct (weight % in part cost), baseIndex (base period index value), currentIndex (current period index value), indexName (index source name). RESPOND ONLY VALID JSON: {"costSheet":[{"component":"str","weightPct":60,"baseIndex":48500,"currentIndex":44700,"indexName":"JSW HRC"}]}`,
+},
+"vave":{
+  sampleOutput:{title:"Bracket Assembly | 3 VaVe Ideas",rows:[{l:"#1: Material change (MS→HSLA)",v:"Save ₹18/pc (thinner gauge)"},{l:"#2: Eliminate plating",v:"Save ₹12/pc (powder coat instead)"},{l:"#3: Combine 2 parts",v:"Save ₹25/pc (one stamping)"},{l:"Implementation Cost",v:"Tool mod: ₹1.8L (one-time)"},{l:"Testing & Validation",v:"₹45K (2 weeks)"}],totals:[{l:"Total Savings/Piece",v:"₹55/pc",hl:1},{l:"Annual Volume (80,000)",v:"₹44 Lakhs/year"},{l:"Payback on Investment",v:"0.6 months"},{l:"5-Year NPV",v:"₹2.1 Cr"}]},
+  aiHint:"Upload a part drawing or spec sheet for AI VaVe suggestions",
+  help:{when:"Use when you need to build a structured value engineering pipeline — for cost reduction programs, new product development, or supplier partnership programs. VaVe (Value Analysis / Value Engineering) identifies where cost can be reduced without compromising function.",howTo:["Enter part name and current cost per piece","Add VaVe ideas one by one: each with description, estimated savings (₹/piece), risk level, implementation effort, and category","Categories: material substitution, process change, design simplification, tolerance relaxation, supplier optimization, logistics","For AI-powered ideas, upload a drawing — the AI will suggest VaVe opportunities based on material, geometry, and manufacturing process","Rate each idea's risk (Low/Medium/High) and effort (Easy/Medium/Hard) for prioritization"],output:["Total potential savings per piece (₹ and %)","New target cost after implementing all ideas","Idea count with risk and effort breakdown","Use as a VaVe tracker — present to engineering team for validation"],tips:["Start with low-risk, easy-effort ideas — build momentum before tackling design changes","Material substitution is usually the biggest lever (5-15% of part cost)","Tolerance relaxation is the easiest win — most drawings are over-specified by 30-40%","Run VaVe workshops with supplier + your engineering team together for best results","Track implementation rate — a good program converts 60-70% of identified ideas within 6 months"]},
+  fields:[{k:"partName",l:"Part"},{k:"currentCost",l:"Current ₹/pc",t:"number"}],
+  cols:[{key:"idea",label:"VaVe Idea",w:170},{key:"description",label:"Details",w:200},{key:"savingsPerPc",label:"Save₹",type:"number",w:80,step:"0.5",def:0},{key:"risk",label:"Risk",type:"select",w:70,options:["Low","Medium","High"],def:"Low"},{key:"effort",label:"Effort",type:"select",w:70,options:["Easy","Medium","Hard"],def:"Medium"},{key:"category",label:"Type",type:"select",w:100,options:["material","process","design","tolerance","supplier","logistics","other"],def:"material"}],
+  addLabel:"Add Idea",sectionTitle:"🔄 VaVe Ideas",
+  calcFn:(ops,cfg)=>{let t=0;ops.forEach(o=>t+=Number(o.savingsPerPc)||0);const c=Number(cfg.currentCost)||0;return{total:t,totalSavings:t,newCost:c-t,pctReduction:c>0?(t/c*100):0,ideaCount:ops.length}},
+  barFn:(r,cfg)=>[{l:"Current",v:"₹"+(Number(cfg.currentCost)||0).toFixed(2)},{l:"Savings",v:"₹"+r.totalSavings.toFixed(2),hl:1},{l:"New",v:"₹"+r.newCost.toFixed(2)},{l:"Cut%",v:r.pctReduction.toFixed(1)+"%"}],
+  resultLabel:"Savings/Pc",
+  templates:{
+    t1:{label:"⚙️ Housing VaVe",cfg:{partName:"Motor Housing",currentCost:240},ops:[{idea:"Material Downgrade",description:"Switch to commercial grade where stress allows",savingsPerPc:4.2,risk:"Low",effort:"Easy",category:"material"},{idea:"Reduce Weld Passes",description:"Optimize from 3 to 2 passes",savingsPerPc:3.5,risk:"Low",effort:"Easy",category:"process"},{idea:"Tolerance Relaxation",description:"Bore ±0.1→±0.15",savingsPerPc:2.8,risk:"Medium",effort:"Easy",category:"tolerance"},{idea:"Combine Brackets",description:"3 parts→1 integrated",savingsPerPc:5.0,risk:"Low",effort:"Medium",category:"design"},{idea:"Alt Supplier",description:"Secondary mill source",savingsPerPc:6.0,risk:"Medium",effort:"Medium",category:"supplier"}]},
+    blank:{label:"📝 Custom",cfg:{partName:"",currentCost:0},ops:[]},
+  },
+  prompt:`Value engineering expert. Analyze the part drawing/specs and generate VaVe (Value Analysis / Value Engineering) cost reduction ideas. Generate JSON with costSheet array. Each idea must have: idea (short title), description (detailed explanation), savingsPerPc (estimated savings ₹ per piece), risk (one of: Low, Medium, High), effort (one of: Easy, Medium, Hard), category (one of: material, process, design, tolerance, supplier, logistics, other). RESPOND ONLY VALID JSON: {"costSheet":[{"idea":"str","description":"str","savingsPerPc":5,"risk":"Low","effort":"Easy","category":"material"}]}`,
+},
+};
+
+// ─── SHOULD-COST & TOOL-COST TEMPLATES ───
+const SC_T={
+  t1:{label:"⚙️ CNC Housing",rm:[{mat:"Aluminum 6061",grade:"6061-T6",wt:"0.85",rate:"300"}],ops:[{step:10,operation:"Bar Cutting",machine:"Band Saw",cycleTimeMin:0.5,ratePerMin:2.5},{step:20,operation:"VMC Op1",description:"Face & profile",machine:"VMC",cycleTimeMin:4.5,ratePerMin:14},{step:30,operation:"VMC Op2",description:"Pockets & bores",machine:"VMC",cycleTimeMin:6,ratePerMin:14},{step:40,operation:"Drilling/Tapping",machine:"VMC",cycleTimeMin:2,ratePerMin:14},{step:50,operation:"Deburring",machine:"Manual",cycleTimeMin:1.5,ratePerMin:2.5},{step:60,operation:"CMM Inspection",machine:"CMM",cycleTimeMin:2,ratePerMin:8}],sec:[{operation:"Anodizing",costPerPiece:15}]},
+  t2:{label:"🔩 Stamped Bracket",rm:[{mat:"Mild Steel / CRS",grade:"CRS-D",wt:"0.35",rate:"70"}],ops:[{step:10,operation:"Blanking",machine:"60T Press",cycleTimeMin:0.15,ratePerMin:5},{step:20,operation:"Forming",machine:"80T Press",cycleTimeMin:0.2,ratePerMin:5.5},{step:30,operation:"Piercing",machine:"40T Press",cycleTimeMin:0.12,ratePerMin:4.5},{step:40,operation:"Deburring",machine:"Tumbler",cycleTimeMin:0.3,ratePerMin:2},{step:50,operation:"Inspection",machine:"Gauges",cycleTimeMin:0.1,ratePerMin:2}],sec:[{operation:"Zinc Plating",costPerPiece:2.5}]},
+  blank:{label:"📝 Blank",rm:[{mat:"Mild Steel / CRS",grade:"",wt:"",rate:"70"}],ops:[],sec:[]},
+};
+const TC_T={
+  prog_die:{label:"🔨 Progressive Die (small)",rm:[{mat:"D2 Tool Steel",grade:"D2 HRC 58-60",wt:"180",rate:"320"}],ops:[{step:10,operation:"Tool Design & CAM",hoursEstimate:40,ratePerHour:1000},{step:20,operation:"CNC Roughing — Die Block",hoursEstimate:24,ratePerHour:1000},{step:30,operation:"CNC Roughing — Punch Block",hoursEstimate:20,ratePerHour:1000},{step:40,operation:"Heat Treatment (Vacuum)",hoursEstimate:8,ratePerHour:400},{step:50,operation:"CNC Finishing — Die",hoursEstimate:16,ratePerHour:1200},{step:60,operation:"CNC Finishing — Punch",hoursEstimate:12,ratePerHour:1200},{step:70,operation:"Wire EDM — Profile Cut",hoursEstimate:30,ratePerHour:800},{step:80,operation:"Surface Grinding",hoursEstimate:12,ratePerHour:600},{step:90,operation:"Jig Grinding",hoursEstimate:6,ratePerHour:900},{step:100,operation:"Polishing",hoursEstimate:8,ratePerHour:500},{step:110,operation:"Assembly & Fitting",hoursEstimate:16,ratePerHour:600},{step:120,operation:"Trial Runs (Press)",hoursEstimate:8,ratePerHour:1500}],sec:[{item:"Guide Pillars & Bushes (4 sets)",cost:4500},{item:"Ball Bearing Guide",cost:3000},{item:"Springs & Strippers",cost:3000},{item:"Fasteners & Dowels",cost:1500},{item:"Die Set (Standard)",cost:8000}]},
+  prog_die_large:{label:"🔨 Progressive Die (large 6-station)",rm:[{mat:"D2 Tool Steel",grade:"D2 HRC 58-60",wt:"450",rate:"320"},{mat:"Mild Steel / CRS",grade:"EN8 Bolster",wt:"200",rate:"75"}],ops:[{step:10,operation:"Tool Design & Simulation",hoursEstimate:80,ratePerHour:1200},{step:20,operation:"CNC Roughing — Die Plates (6 stations)",hoursEstimate:60,ratePerHour:1000},{step:30,operation:"CNC Roughing — Punch Plates (6 stations)",hoursEstimate:50,ratePerHour:1000},{step:40,operation:"Heat Treatment (Vacuum)",hoursEstimate:16,ratePerHour:400},{step:50,operation:"Sub-zero Treatment",hoursEstimate:4,ratePerHour:600},{step:60,operation:"CNC Finishing — Die",hoursEstimate:40,ratePerHour:1200},{step:70,operation:"CNC Finishing — Punch",hoursEstimate:35,ratePerHour:1200},{step:80,operation:"Wire EDM — Profile (6 stations)",hoursEstimate:70,ratePerHour:800},{step:90,operation:"Sink EDM — Complex Profiles",hoursEstimate:20,ratePerHour:700},{step:100,operation:"Surface Grinding",hoursEstimate:20,ratePerHour:600},{step:110,operation:"Jig Grinding — Precision Holes",hoursEstimate:12,ratePerHour:900},{step:120,operation:"Polishing (all stations)",hoursEstimate:16,ratePerHour:500},{step:130,operation:"Assembly & Alignment",hoursEstimate:32,ratePerHour:700},{step:140,operation:"Trial + Correction (3 rounds)",hoursEstimate:16,ratePerHour:1500}],sec:[{item:"Die Set (heavy duty)",cost:25000},{item:"Guide Pillars (6 sets)",cost:12000},{item:"Ball Cage Guide",cost:8000},{item:"Nitrogen Gas Springs",cost:15000},{item:"Stripper Bolts & Springs",cost:5000},{item:"Pilot Punches",cost:4000},{item:"Fasteners & Dowels",cost:3000},{item:"Stock Lifters",cost:2500}]},
+  compound_die:{label:"🔩 Compound Die (blank+pierce)",rm:[{mat:"D2 Tool Steel",grade:"D2 HRC 58-60",wt:"120",rate:"320"}],ops:[{step:10,operation:"Tool Design",hoursEstimate:24,ratePerHour:1000},{step:20,operation:"CNC Roughing — Die & Punch",hoursEstimate:20,ratePerHour:1000},{step:30,operation:"Heat Treatment",hoursEstimate:6,ratePerHour:400},{step:40,operation:"CNC Finishing",hoursEstimate:14,ratePerHour:1200},{step:50,operation:"Wire EDM — Blank & Pierce Profile",hoursEstimate:24,ratePerHour:800},{step:60,operation:"Surface Grinding",hoursEstimate:8,ratePerHour:600},{step:70,operation:"Polishing",hoursEstimate:6,ratePerHour:500},{step:80,operation:"Assembly",hoursEstimate:10,ratePerHour:600},{step:90,operation:"Trials",hoursEstimate:6,ratePerHour:1500}],sec:[{item:"Die Set",cost:6000},{item:"Guide Pillars (4)",cost:3500},{item:"Springs & Ejector",cost:2500},{item:"Fasteners",cost:1000}]},
+  blanking_die:{label:"✂️ Blanking Die (simple)",rm:[{mat:"D2 Tool Steel",grade:"D2",wt:"80",rate:"320"}],ops:[{step:10,operation:"Tool Design",hoursEstimate:16,ratePerHour:1000},{step:20,operation:"CNC Machining — Die Block",hoursEstimate:12,ratePerHour:1000},{step:30,operation:"CNC Machining — Punch",hoursEstimate:8,ratePerHour:1000},{step:40,operation:"Heat Treatment",hoursEstimate:4,ratePerHour:400},{step:50,operation:"Wire EDM — Profile",hoursEstimate:14,ratePerHour:800},{step:60,operation:"Grinding",hoursEstimate:6,ratePerHour:600},{step:70,operation:"Assembly",hoursEstimate:6,ratePerHour:600},{step:80,operation:"Trials",hoursEstimate:4,ratePerHour:1500}],sec:[{item:"Die Set (standard)",cost:5000},{item:"Guide Pillars",cost:2500},{item:"Fasteners",cost:800}]},
+  bending_die:{label:"📐 Bending Die (V/U/Z bend)",rm:[{mat:"D2 Tool Steel",grade:"D2 HRC 56-58",wt:"95",rate:"320"}],ops:[{step:10,operation:"Tool Design (bend analysis)",hoursEstimate:16,ratePerHour:1000},{step:20,operation:"CNC Machining — V-Block/Punch",hoursEstimate:14,ratePerHour:1000},{step:30,operation:"Heat Treatment",hoursEstimate:4,ratePerHour:400},{step:40,operation:"CNC Finishing — Radius Profile",hoursEstimate:10,ratePerHour:1200},{step:50,operation:"Surface Grinding",hoursEstimate:6,ratePerHour:600},{step:60,operation:"Polishing — Bend Radius",hoursEstimate:4,ratePerHour:500},{step:70,operation:"Assembly",hoursEstimate:6,ratePerHour:600},{step:80,operation:"Trial + Springback Adj.",hoursEstimate:8,ratePerHour:1500}],sec:[{item:"Die Set",cost:5000},{item:"Guide Pillars",cost:2500},{item:"Pressure Pad Springs",cost:2000},{item:"Fasteners",cost:800}]},
+  deep_draw_die:{label:"🫙 Deep Drawing Die",rm:[{mat:"D2 Tool Steel",grade:"D2 HRC 58-60",wt:"250",rate:"320"},{mat:"Cast Iron",grade:"FG260 Blank Holder",wt:"80",rate:"55"}],ops:[{step:10,operation:"Tool Design (draw simulation)",hoursEstimate:40,ratePerHour:1200},{step:20,operation:"CNC Roughing — Die Ring",hoursEstimate:20,ratePerHour:1000},{step:30,operation:"CNC Roughing — Punch",hoursEstimate:16,ratePerHour:1000},{step:40,operation:"CNC — Blank Holder",hoursEstimate:12,ratePerHour:1000},{step:50,operation:"Heat Treatment",hoursEstimate:8,ratePerHour:400},{step:60,operation:"CNC Finishing — Die Radius",hoursEstimate:16,ratePerHour:1200},{step:70,operation:"CNC Finishing — Punch",hoursEstimate:12,ratePerHour:1200},{step:80,operation:"Grinding",hoursEstimate:10,ratePerHour:600},{step:90,operation:"Polishing (mirror Ra 0.2)",hoursEstimate:16,ratePerHour:600},{step:100,operation:"Chrome Plating",hoursEstimate:4,ratePerHour:800},{step:110,operation:"Assembly",hoursEstimate:12,ratePerHour:600},{step:120,operation:"Draw Trials (multi-stage)",hoursEstimate:16,ratePerHour:1500}],sec:[{item:"Die Set (heavy)",cost:15000},{item:"Nitrogen Gas Springs",cost:12000},{item:"Guide Pillars",cost:5000},{item:"Draw Beads",cost:3000},{item:"Fasteners",cost:1500}]},
+  transfer_die:{label:"🔄 Transfer Die Set",rm:[{mat:"D2 Tool Steel",grade:"D2",wt:"600",rate:"320"},{mat:"Mild Steel / CRS",grade:"EN8 Bolsters",wt:"350",rate:"75"}],ops:[{step:10,operation:"Tool Design (4-station transfer)",hoursEstimate:100,ratePerHour:1200},{step:20,operation:"CNC Roughing — All Stations",hoursEstimate:80,ratePerHour:1000},{step:30,operation:"Heat Treatment",hoursEstimate:16,ratePerHour:400},{step:40,operation:"CNC Finishing — All Stations",hoursEstimate:60,ratePerHour:1200},{step:50,operation:"Wire EDM",hoursEstimate:50,ratePerHour:800},{step:60,operation:"Sink EDM",hoursEstimate:20,ratePerHour:700},{step:70,operation:"Grinding",hoursEstimate:24,ratePerHour:600},{step:80,operation:"Polishing",hoursEstimate:16,ratePerHour:500},{step:90,operation:"Assembly & Alignment",hoursEstimate:40,ratePerHour:700},{step:100,operation:"Transfer Finger Setup",hoursEstimate:16,ratePerHour:800},{step:110,operation:"Trial + Correction",hoursEstimate:24,ratePerHour:1500}],sec:[{item:"Die Sets (4 nos)",cost:50000},{item:"Transfer Fingers + Guides",cost:30000},{item:"Gas Springs (8 nos)",cost:20000},{item:"Guide Pillars (16 sets)",cost:18000},{item:"Pilots + Fasteners",cost:8000}]},
+  inj_mould_1cav:{label:"💉 Injection Mould (1-cavity)",rm:[{mat:"P20 Mould Steel",grade:"P20 pre-hard",wt:"180",rate:"180"}],ops:[{step:10,operation:"Mould Design + DFM",hoursEstimate:40,ratePerHour:1000},{step:20,operation:"CNC Roughing — Core",hoursEstimate:20,ratePerHour:1000},{step:30,operation:"CNC Roughing — Cavity",hoursEstimate:20,ratePerHour:1000},{step:40,operation:"CNC Finishing — Core",hoursEstimate:16,ratePerHour:1200},{step:50,operation:"CNC Finishing — Cavity",hoursEstimate:16,ratePerHour:1200},{step:60,operation:"Sink EDM — Texturing",hoursEstimate:12,ratePerHour:700},{step:70,operation:"Wire EDM — Inserts",hoursEstimate:10,ratePerHour:800},{step:80,operation:"Grinding",hoursEstimate:8,ratePerHour:600},{step:90,operation:"Polishing (SPI A2)",hoursEstimate:12,ratePerHour:500},{step:100,operation:"Assembly",hoursEstimate:16,ratePerHour:600},{step:110,operation:"Trial + Correction",hoursEstimate:12,ratePerHour:1500}],sec:[{item:"Mould Base (standard)",cost:20000},{item:"Hot Sprue Bush",cost:5000},{item:"Ejector Pins (set)",cost:4000},{item:"Cooling Fittings + Hoses",cost:3000},{item:"O-rings + Seals",cost:1000},{item:"Guide Pillars + Bushes",cost:4000}]},
+  inj_mould_4cav:{label:"💉 Injection Mould (4-cavity)",rm:[{mat:"P20 Mould Steel",grade:"P20 pre-hard",wt:"350",rate:"180"},{mat:"H13 Die Steel",grade:"H13 (core inserts)",wt:"40",rate:"350"}],ops:[{step:10,operation:"Mould Design + Moldflow",hoursEstimate:70,ratePerHour:1200},{step:20,operation:"CNC Roughing — Core Side",hoursEstimate:30,ratePerHour:1000},{step:30,operation:"CNC Roughing — Cavity Side",hoursEstimate:30,ratePerHour:1000},{step:40,operation:"CNC Finishing — Core (4 pockets)",hoursEstimate:28,ratePerHour:1200},{step:50,operation:"CNC Finishing — Cavity (4 pockets)",hoursEstimate:28,ratePerHour:1200},{step:60,operation:"Sink EDM — Details",hoursEstimate:20,ratePerHour:700},{step:70,operation:"Wire EDM — Slides & Inserts",hoursEstimate:24,ratePerHour:800},{step:80,operation:"Grinding",hoursEstimate:12,ratePerHour:600},{step:90,operation:"Polishing (all 4 cavities)",hoursEstimate:20,ratePerHour:500},{step:100,operation:"Texturing (external vendor)",hoursEstimate:8,ratePerHour:1000},{step:110,operation:"Assembly + Runner Balance",hoursEstimate:24,ratePerHour:700},{step:120,operation:"Trial + Correction (3 rounds)",hoursEstimate:20,ratePerHour:1500}],sec:[{item:"Mould Base (custom)",cost:40000},{item:"Hot Runner System (4 drop)",cost:65000},{item:"Slides & Lifters (4 sets)",cost:20000},{item:"Ejector Pins + Sleeves",cost:8000},{item:"Cooling — Baffles + Fittings",cost:6000},{item:"Guide Pillars + Bushes",cost:6000},{item:"Interlocks + Latches",cost:4000}]},
+  inj_mould_8cav:{label:"💉 Injection Mould (8-cavity, hot runner)",rm:[{mat:"P20 Mould Steel",grade:"P20",wt:"550",rate:"180"},{mat:"H13 Die Steel",grade:"H13 (inserts)",wt:"80",rate:"350"}],ops:[{step:10,operation:"Mould Design + Simulation",hoursEstimate:100,ratePerHour:1200},{step:20,operation:"CNC Roughing — Core/Cavity",hoursEstimate:70,ratePerHour:1000},{step:30,operation:"CNC Finishing — 8 Cavities",hoursEstimate:60,ratePerHour:1200},{step:40,operation:"Sink EDM",hoursEstimate:30,ratePerHour:700},{step:50,operation:"Wire EDM",hoursEstimate:32,ratePerHour:800},{step:60,operation:"Grinding",hoursEstimate:16,ratePerHour:600},{step:70,operation:"Polishing (8 cav)",hoursEstimate:28,ratePerHour:500},{step:80,operation:"Assembly + Balancing",hoursEstimate:36,ratePerHour:700},{step:90,operation:"Trial + Optimization",hoursEstimate:24,ratePerHour:1500}],sec:[{item:"Mould Base (heavy)",cost:60000},{item:"Hot Runner (8-drop valve gate)",cost:180000},{item:"Slides & Lifters",cost:35000},{item:"Ejector System",cost:12000},{item:"Conformal Cooling Inserts",cost:25000},{item:"Guide + Interlock",cost:10000}]},
+  blow_mould:{label:"🍶 Blow Mould (PET/HDPE bottle)",rm:[{mat:"Aluminum 6061",grade:"7075-T6",wt:"60",rate:"450"},{mat:"Mild Steel / CRS",grade:"EN8 Back Plate",wt:"30",rate:"75"}],ops:[{step:10,operation:"Mould Design (bottle profile)",hoursEstimate:24,ratePerHour:1000},{step:20,operation:"CNC Roughing — 2 Halves",hoursEstimate:16,ratePerHour:1000},{step:30,operation:"CNC Finishing — Cavity Profile",hoursEstimate:20,ratePerHour:1200},{step:40,operation:"CNC — Neck Ring Insert",hoursEstimate:8,ratePerHour:1200},{step:50,operation:"CNC — Bottom Plug",hoursEstimate:6,ratePerHour:1000},{step:60,operation:"Polishing (mirror finish)",hoursEstimate:10,ratePerHour:500},{step:70,operation:"Sand Blasting (texture)",hoursEstimate:2,ratePerHour:400},{step:80,operation:"Assembly + Cooling Lines",hoursEstimate:8,ratePerHour:600},{step:90,operation:"Trial on Machine",hoursEstimate:8,ratePerHour:1500}],sec:[{item:"Neck Ring Insert (SS)",cost:8000},{item:"Bottom Plug",cost:4000},{item:"Cooling Fittings",cost:2500},{item:"Engraving (logo)",cost:3000}]},
+  compression_mould:{label:"♨️ Compression Mould (rubber/SMC)",rm:[{mat:"P20 Mould Steel",grade:"P20 Chrome Plated",wt:"120",rate:"180"}],ops:[{step:10,operation:"Mould Design",hoursEstimate:24,ratePerHour:1000},{step:20,operation:"CNC Roughing",hoursEstimate:16,ratePerHour:1000},{step:30,operation:"CNC Finishing",hoursEstimate:14,ratePerHour:1200},{step:40,operation:"EDM — Flash Grooves",hoursEstimate:8,ratePerHour:700},{step:50,operation:"Grinding",hoursEstimate:6,ratePerHour:600},{step:60,operation:"Hard Chrome Plating",hoursEstimate:4,ratePerHour:800},{step:70,operation:"Polishing",hoursEstimate:8,ratePerHour:500},{step:80,operation:"Assembly",hoursEstimate:8,ratePerHour:600},{step:90,operation:"Trials",hoursEstimate:8,ratePerHour:1200}],sec:[{item:"Heating Elements",cost:6000},{item:"Thermocouple + Controller",cost:4000},{item:"Ejector System",cost:3000},{item:"Guide Pillars",cost:3000},{item:"Chrome Plating (vendor)",cost:5000}]},
+  hpdc_die:{label:"🔥 HPDC Die (Aluminum)",rm:[{mat:"H13 Die Steel",grade:"H13 HRC 44-48",wt:"400",rate:"350"},{mat:"Mild Steel / CRS",grade:"EN8 Holder",wt:"250",rate:"75"}],ops:[{step:10,operation:"Die Design + Flow Simulation",hoursEstimate:80,ratePerHour:1200},{step:20,operation:"CNC Roughing — Cover Die",hoursEstimate:30,ratePerHour:1000},{step:30,operation:"CNC Roughing — Ejector Die",hoursEstimate:30,ratePerHour:1000},{step:40,operation:"Heat Treatment (vacuum quench)",hoursEstimate:12,ratePerHour:500},{step:50,operation:"CNC Finishing — Cover",hoursEstimate:24,ratePerHour:1200},{step:60,operation:"CNC Finishing — Ejector",hoursEstimate:24,ratePerHour:1200},{step:70,operation:"Sink EDM — Details",hoursEstimate:24,ratePerHour:700},{step:80,operation:"Wire EDM — Slides",hoursEstimate:16,ratePerHour:800},{step:90,operation:"Grinding + Lapping",hoursEstimate:12,ratePerHour:600},{step:100,operation:"Polishing + Nitriding",hoursEstimate:12,ratePerHour:600},{step:110,operation:"Assembly + Cooling/Spray",hoursEstimate:24,ratePerHour:700},{step:120,operation:"Trial Casting + Correction",hoursEstimate:24,ratePerHour:2000}],sec:[{item:"Die Holder Base",cost:25000},{item:"Core Pins (set)",cost:15000},{item:"Slide Mechanisms (4)",cost:20000},{item:"Shot Sleeve + Tip",cost:12000},{item:"Cooling Lines + Fittings",cost:8000},{item:"Spray System Setup",cost:5000},{item:"Ejector Pins + Plate",cost:8000},{item:"Nitriding (vendor)",cost:10000}]},
+  gravity_die:{label:"⚙️ Gravity Die Cast (Aluminum)",rm:[{mat:"Cast Iron",grade:"FG260 / GG25",wt:"200",rate:"55"},{mat:"H13 Die Steel",grade:"H13 (core pins)",wt:"25",rate:"350"}],ops:[{step:10,operation:"Die Design",hoursEstimate:40,ratePerHour:1000},{step:20,operation:"Pattern Making",hoursEstimate:20,ratePerHour:600},{step:30,operation:"Casting (die blocks)",hoursEstimate:8,ratePerHour:400},{step:40,operation:"CNC Roughing",hoursEstimate:24,ratePerHour:1000},{step:50,operation:"CNC Finishing",hoursEstimate:20,ratePerHour:1200},{step:60,operation:"EDM — Details",hoursEstimate:10,ratePerHour:700},{step:70,operation:"Grinding",hoursEstimate:8,ratePerHour:600},{step:80,operation:"Assembly + Coating",hoursEstimate:12,ratePerHour:600},{step:90,operation:"Trial Casting",hoursEstimate:12,ratePerHour:1500}],sec:[{item:"Core Pins (H13)",cost:8000},{item:"Tilting Mechanism",cost:10000},{item:"Ejector System",cost:5000},{item:"Refractory Coating",cost:3000},{item:"Fasteners + Locators",cost:2000}]},
+  forging_closed:{label:"🔨 Closed Die Forging",rm:[{mat:"H13 Die Steel",grade:"H13 HRC 44-48",wt:"300",rate:"350"},{mat:"Mild Steel / CRS",grade:"EN8 Die Holder",wt:"150",rate:"75"}],ops:[{step:10,operation:"Die Design + FEA Simulation",hoursEstimate:60,ratePerHour:1200},{step:20,operation:"CNC Roughing — Top Die",hoursEstimate:24,ratePerHour:1000},{step:30,operation:"CNC Roughing — Bottom Die",hoursEstimate:24,ratePerHour:1000},{step:40,operation:"Heat Treatment",hoursEstimate:12,ratePerHour:500},{step:50,operation:"CNC Finishing — Flash Land",hoursEstimate:16,ratePerHour:1200},{step:60,operation:"EDM — Complex Cavities",hoursEstimate:20,ratePerHour:700},{step:70,operation:"Grinding + Lapping",hoursEstimate:10,ratePerHour:600},{step:80,operation:"Assembly + Alignment",hoursEstimate:12,ratePerHour:600},{step:90,operation:"Trial Forging",hoursEstimate:16,ratePerHour:2000}],sec:[{item:"Flash Trimming Die",cost:20000},{item:"Die Holder Blocks",cost:12000},{item:"Ejector System",cost:6000},{item:"Die Spray Setup",cost:4000},{item:"Locating Keys",cost:2000}]},
+  rubber_mould:{label:"🟤 Rubber Mould (silicone/EPDM)",rm:[{mat:"P20 Mould Steel",grade:"P20 Chrome",wt:"60",rate:"180"}],ops:[{step:10,operation:"Mould Design",hoursEstimate:16,ratePerHour:1000},{step:20,operation:"CNC Machining — Cavity",hoursEstimate:12,ratePerHour:1000},{step:30,operation:"CNC — Flash Grooves",hoursEstimate:4,ratePerHour:1000},{step:40,operation:"EDM (if needed)",hoursEstimate:6,ratePerHour:700},{step:50,operation:"Grinding",hoursEstimate:4,ratePerHour:600},{step:60,operation:"Chrome Plating",hoursEstimate:4,ratePerHour:800},{step:70,operation:"Polishing",hoursEstimate:6,ratePerHour:500},{step:80,operation:"Assembly",hoursEstimate:4,ratePerHour:600},{step:90,operation:"Trial Moulding",hoursEstimate:6,ratePerHour:1200}],sec:[{item:"Heating Plates",cost:4000},{item:"Thermocouple",cost:2000},{item:"Chrome Plating (vendor)",cost:3500},{item:"Fasteners",cost:800}]},
+  thermoform_mould:{label:"📋 Thermoforming Mould",rm:[{mat:"Aluminum 6061",grade:"6061-T6",wt:"45",rate:"300"}],ops:[{step:10,operation:"Mould Design",hoursEstimate:16,ratePerHour:1000},{step:20,operation:"CNC Roughing",hoursEstimate:10,ratePerHour:1000},{step:30,operation:"CNC Finishing — Profile",hoursEstimate:12,ratePerHour:1200},{step:40,operation:"Drilling — Vacuum Holes",hoursEstimate:6,ratePerHour:600},{step:50,operation:"Polishing/Texturing",hoursEstimate:6,ratePerHour:500},{step:60,operation:"Assembly + Vacuum Check",hoursEstimate:4,ratePerHour:600},{step:70,operation:"Trials",hoursEstimate:4,ratePerHour:1200}],sec:[{item:"Vacuum Manifold + Fittings",cost:4000},{item:"Clamp Frame",cost:3000},{item:"Trim Die",cost:8000},{item:"Fasteners",cost:800}]},
+  jig_fixture:{label:"📌 Jig & Fixture (welding/machining)",rm:[{mat:"Mild Steel / CRS",grade:"EN8",wt:"60",rate:"75"},{mat:"D2 Tool Steel",grade:"D2 (locators/bushes)",wt:"8",rate:"320"}],ops:[{step:10,operation:"Fixture Design",hoursEstimate:24,ratePerHour:1000},{step:20,operation:"Base Plate Machining",hoursEstimate:8,ratePerHour:800},{step:30,operation:"Support/Bracket Machining",hoursEstimate:12,ratePerHour:800},{step:40,operation:"Locator Machining (D2)",hoursEstimate:8,ratePerHour:1000},{step:50,operation:"Heat Treatment (locators only)",hoursEstimate:3,ratePerHour:400},{step:60,operation:"Grinding (locators)",hoursEstimate:4,ratePerHour:600},{step:70,operation:"Welding — Frame",hoursEstimate:6,ratePerHour:500},{step:80,operation:"Assembly + Setting",hoursEstimate:8,ratePerHour:600},{step:90,operation:"First-off Validation",hoursEstimate:4,ratePerHour:1000}],sec:[{item:"Toggle Clamps (4 nos)",cost:3200},{item:"Diamond Pins + Rest Pads",cost:4000},{item:"Pneumatic Cylinders (2)",cost:5000},{item:"Quick Connect Fittings",cost:1500},{item:"Paint + ID Plate",cost:800}]},
+  checking_fixture:{label:"📐 Checking Fixture / Gauge",rm:[{mat:"Aluminum 6061",grade:"6061-T6 (base)",wt:"25",rate:"300"},{mat:"D2 Tool Steel",grade:"D2 (gauging surfaces)",wt:"5",rate:"320"}],ops:[{step:10,operation:"Fixture Design (GD&T based)",hoursEstimate:30,ratePerHour:1200},{step:20,operation:"CNC — Aluminum Base",hoursEstimate:10,ratePerHour:1000},{step:30,operation:"CNC — D2 Gauge Inserts",hoursEstimate:8,ratePerHour:1200},{step:40,operation:"Heat Treatment (D2 inserts)",hoursEstimate:3,ratePerHour:400},{step:50,operation:"Precision Grinding",hoursEstimate:8,ratePerHour:800},{step:60,operation:"CMM Calibration",hoursEstimate:4,ratePerHour:1500},{step:70,operation:"Assembly + Anodizing",hoursEstimate:6,ratePerHour:600},{step:80,operation:"Final CMM Report",hoursEstimate:4,ratePerHour:1500}],sec:[{item:"Dial Indicators (2)",cost:3000},{item:"Go/NoGo Pins",cost:2500},{item:"Anodizing (vendor)",cost:2000},{item:"Carrying Case",cost:1500},{item:"CMM Cert + Sticker",cost:2000}]},
+  blank:{label:"📝 Blank — Custom Tool",rm:[{mat:"D2 Tool Steel",grade:"D2",wt:"",rate:"320"}],ops:[],sec:[]},
+};
+
+const SC_PROMPT=`You are a senior manufacturing engineer with 25+ years experience in Indian manufacturing. You are building a ZERO-BASED SHOULD-COST MODEL from engineering drawings.
+
+Your job: Read the drawing/BOM carefully and generate a COMPLETE, operation-by-operation manufacturing process sheet — from raw material preparation to final inspection. Think like you are walking through the factory floor watching this part being made.
+
+## EXTRACT TWO THINGS:
+
+### 1. BILL OF MATERIALS (components)
+For each component:
+- name, grade, materialCategory, weightKg, qty
+- materialCategory MUST be one of: Mild Steel / CRS, SS 304, SS 316, Aluminum 6061, Aluminum 6063, Cast Iron, Brass, Copper, D2 Tool Steel, P20 Mould Steel, H13 Die Steel, PP, ABS, Nylon PA6, Corrugated Board, Other
+
+### 2. MANUFACTURING PROCESS SHEET (operations)
+List EVERY manufacturing operation in sequence. For each operation:
+- operation: short name (e.g. "Tube Cutting", "Mitering", "Deburring", "Brazing", "Alignment Check")
+- machine: specific equipment (e.g. "Band Saw", "50T Hydraulic Press", "MIG Welder 250A", "VMC Fanuc", "Surface Grinder")
+- cycleTimeMin: estimated cycle time in minutes for ONE piece (realistic for Indian high-volume manufacturing)
+- ratePerMin: combined machine + operator cost per minute in ₹ (include depreciation, power, operator wage, consumables)
+
+Also provide:
+- secondaryOps: array of finishing operations with {operation, costPerPiece} (e.g. painting, plating, powder coating — estimate full cost per piece in ₹)
+
+## REALISTIC INDIAN MANUFACTURING RATES (₹/min):
+- Manual operations (deburring, cleaning, inspection): 1.5–3
+- Band saw, drill press, manual press: 2–4
+- Tube notcher, bending machine: 3–5
+- Hydraulic press (50-100T): 4–7
+- MIG/MAG welder: 4–6, TIG welder: 5–8
+- Brazing hearth/furnace: 5–8
+- Conventional lathe, milling: 4–7
+- CNC turning: 8–14, VMC/HMC: 12–20
+- Wire EDM: 10–18, Surface grinder: 6–10
+- Injection moulding (small): 8–15
+- Assembly fixture/jig: 2–4
+
+## CYCLE TIME GUIDELINES (high-volume >50K/year):
+- Simple cuts: 0.2–0.5 min
+- Press operations: 0.1–0.5 min
+- MIG weld runs (per joint): 0.3–1.5 min
+- CNC machining: 1–30 min depending on complexity
+- Deburring: 0.2–1.0 min, Inspection: 0.3–1.0 min
+
+Also provide:
+- partName: short name for the part
+- partDescription: one-line description of what the part is and its function
+- totalWeightKg: total estimated weight
+- complexity: "simple", "standard", "complex", or "highly complex"
+- negotiationPoints: 3-5 specific sourcing/negotiation insights for a procurement buyer
+- suggestedBenchmarks: recommend realistic cost parameters based on this part type, complexity, and Indian manufacturing benchmarks:
+  - overheadPct: factory overhead as % of process cost (typically 10-25% depending on facility type)
+  - profitPct: supplier profit margin % (typically 5-12% depending on competition)
+  - rejectionPct: expected rejection/scrap rate % (typically 1-5% depending on process)
+  - inventoryCarryPct: inventory holding cost as % of unit cost (typically 1-3%)
+  - packagingCostPerPc: packaging cost ₹/piece (corrugated box, foam, wrap — estimate based on part size)
+  - logisticsCostPerPc: inbound logistics ₹/piece (estimate based on weight and typical Ludhiana/Rajkot freight)
+  - inspectionCostPerPc: QC/inspection cost ₹/piece (visual + dimensional)
+
+RESPOND ONLY VALID JSON — no markdown, no backticks:
+{"partName":"str","partDescription":"str","totalWeightKg":0.85,"complexity":"standard","components":[{"name":"str","grade":"str","materialCategory":"str","weightKg":0.5,"qty":1,"scrapPct":0.08}],"processSheet":[{"operation":"str","description":"str","machine":"str","cycleTimeMin":0.5,"ratePerMin":4.0,"category":"preparation"}],"secondaryOps":[{"operation":"str","description":"str","costPerPiece":5}],"negotiationPoints":["str"],"suggestedBenchmarks":{"overheadPct":15,"profitPct":8,"rejectionPct":2,"inventoryCarryPct":1.5,"packagingCostPerPc":3,"logisticsCostPerPc":2,"inspectionCostPerPc":1.5}}`;
+const TC_PROMPT=`You are a senior tool room engineer with 20+ years experience in Indian manufacturing. Estimate the cost of the tool/die/mould shown in the drawing.
+
+## GENERATE:
+
+### 1. OPERATION SHEET (toolroom operations)
+For each machining operation needed to build this tool:
+- operation: name (e.g. "CNC Rough Machining", "Wire EDM Profile", "Sink EDM Cavity", "Surface Grinding", "Polishing", "Heat Treatment", "Fitting & Assembly")
+- hoursEstimate: estimated hours for this operation
+- ratePerHour: ₹/hour rate for this machine/operation
+
+Typical Indian tool room rates (₹/hr):
+- CNC VMC/HMC: 800–1200
+- Wire EDM: 600–900
+- Sink EDM: 500–800
+- Surface Grinder: 400–600
+- CNC Turning: 600–900
+- Conventional machining: 300–500
+- Fitting & Assembly: 250–400
+- Polishing: 300–500
+- Heat Treatment: 200–400 (outsourced per batch)
+- Design & CAM: 400–800
+
+### 2. SECONDARY COSTS (bought-out items)
+Standard parts needed: {item, cost} in ₹
+Examples: guide pillars, bushings, springs, ejector pins, hot runners, screws, dowels
+
+RESPOND ONLY VALID JSON — no markdown, no backticks:
+{"operationSheet":[{"operation":"str","hoursEstimate":4,"ratePerHour":800}],"secondaryCosts":[{"item":"str","cost":1000}]}`;
+
+// ─── AI CALLER ───
+const toB64=f=>new Promise((r,j)=>{const x=new FileReader();x.onload=()=>r(x.result.split(",")[1]);x.onerror=()=>j("fail");x.readAsDataURL(f)});
+const mtype=f=>{const e=f.name.split(".").pop().toLowerCase();return{pdf:"application/pdf",png:"image/png",jpg:"image/jpeg",jpeg:"image/jpeg"}[e]||"application/octet-stream"};
+const fext=f=>(f.name||"").split(".").pop().toLowerCase();
+const toText=f=>new Promise((r,j)=>{const x=new FileReader();x.onload=()=>r(x.result);x.onerror=()=>j("read fail");x.readAsText(f)});
+const toArrBuf=f=>new Promise((r,j)=>{const x=new FileReader();x.onload=()=>r(new Uint8Array(x.result));x.onerror=()=>j("read fail");x.readAsArrayBuffer(f)});
+
+let _xlsxP=null;
+function loadXLSX(){
+  if(window.XLSX)return Promise.resolve(window.XLSX);
+  if(_xlsxP)return _xlsxP;
+  _xlsxP=new Promise((resolve,reject)=>{
+    const s=document.createElement("script");
+    s.src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+    s.onload=()=>{if(window.XLSX)resolve(window.XLSX);else reject(new Error("XLSX failed to initialize"))};
+    s.onerror=()=>{_xlsxP=null;reject(new Error("Failed to load Excel parser — check internet connection"))};
+    document.head.appendChild(s);
+  });
+  return _xlsxP;
+}
+
+async function parseSpreadsheet(f){
+  const ext=fext(f);
+  if(ext==="csv"||ext==="tsv"){return await toText(f)}
+  const XLSX=await loadXLSX();
+  const buf=await toArrBuf(f);const wb=XLSX.read(buf,{type:"array",cellDates:true});
+  let best="",bestLen=0;
+  for(const sn of wb.SheetNames){const csv=XLSX.utils.sheet_to_csv(wb.Sheets[sn]);if(csv.length>bestLen){best=csv;bestLen=csv.length}}
+  return best;
+}
+const stripCites=s=>s.replace(/<\/?cite[^>]*>/gi,"").replace(/<\/?antml:cite[^>]*>/gi,"");
+
+function repairJSON(raw){
+  // Step 1: clean markdown fences
+  let s=raw.replace(/```json|```/g,"").trim();
+  // Step 2: extract JSON object
+  const i1=s.indexOf("{"),i2=s.lastIndexOf("}");
+  if(i1===-1)throw new Error("No JSON found");
+  s=s.slice(i1,i2>=i1?i2+1:undefined);
+  // Step 3: try direct parse
+  try{return JSON.parse(s)}catch(e1){
+    // Step 4: fix common issues
+    let f=s;
+    // Remove trailing commas before ] or }
+    f=f.replace(/,\s*([}\]])/g,"$1");
+    // Fix unescaped newlines inside strings
+    f=f.replace(/"([^"]*)\n([^"]*)"/g,(m,a,b)=>'"'+a+"\\n"+b+'"');
+    // Try again
+    try{return JSON.parse(f)}catch(e2){
+      // Step 5: truncated response — close open brackets/braces
+      let r=f;
+      // Remove last incomplete string value (truncated mid-string)
+      r=r.replace(/,\s*"[^"]*$/,"");
+      r=r.replace(/:\s*"[^"]*$/,"");
+      // Remove trailing partial objects like {"key": 
+      r=r.replace(/,\s*\{[^}]*$/,"");
+      // Remove trailing comma
+      r=r.replace(/,\s*$/,"");
+      // Count and close open brackets
+      let ob=(r.match(/{/g)||[]).length-(r.match(/}/g)||[]).length;
+      let ab=(r.match(/\[/g)||[]).length-(r.match(/\]/g)||[]).length;
+      for(let i=0;i<ab;i++)r+="]";
+      for(let i=0;i<ob;i++)r+="}";
+      try{return JSON.parse(r)}catch(e3){
+        // Step 6: aggressive — find each top-level key and build partial result
+        const keys=["title","executiveSummary","keyMetrics","findings","riskAreas","recommendations","quickWins","negotiationPoints"];
+        const partial={};
+        for(const k of keys){
+          const rx=new RegExp('"'+k+'"\\s*:\\s*(\\[|")');
+          const m=rx.exec(s);
+          if(!m)continue;
+          const start=m.index+m[0].length-1;
+          if(m[1]==="["){
+            // find matching ]
+            let depth=0,end=start;
+            for(let i=start;i<s.length;i++){
+              if(s[i]==="[")depth++;if(s[i]==="]")depth--;
+              if(depth===0){end=i+1;break}
+            }
+            try{partial[k]=JSON.parse(s.slice(start,end))}catch{}
+          }else{
+            const end=s.indexOf('"',start+1);
+            if(end>start)partial[k]=s.slice(start+1,end);
+          }
+        }
+        if(Object.keys(partial).length>=2)return partial;
+        throw new Error(e3.message);
+      }
+    }
+  }
+}
+async function callAI(files,prompt,notes){
+  const content=[];for(const f of files){
+    const ext=fext(f);
+    if(["xlsx","xls","csv","tsv"].includes(ext)){
+      try{const data=await parseSpreadsheet(f);const preview=data.length>80000?data.slice(0,80000)+"\n...[truncated]":data;content.push({type:"text",text:`[DATA FROM FILE: ${f.name}]\n${preview}`})}
+      catch(pe){content.push({type:"text",text:`[File: ${f.name} — parse error: ${pe.message}]`})}
+    }else{const b=await toB64(f),mt=mtype(f);content.push(mt.startsWith("image/")?{type:"image",source:{type:"base64",media_type:mt,data:b}}:{type:"document",source:{type:"base64",media_type:mt,data:b}})}
+  }
+  content.push({type:"text",text:prompt+"\nNotes: "+(notes||"None")});
+  let r=await apiFetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:API_HEADERS,body:JSON.stringify({model:"claude-opus-4-6",max_tokens:8192,temperature:0,messages:[{role:"user",content}]})});
+  if(!r.ok)r=await apiFetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:API_HEADERS,body:JSON.stringify({model:"claude-sonnet-4-5-20250929",max_tokens:8192,temperature:0,messages:[{role:"user",content}]})});
+  if(!r.ok){const errBody=await r.json().catch(()=>({}));throw new Error("API "+r.status+": "+(errBody?.error?.message||r.statusText))}const d=await r.json(),txt=stripCites(d.content?.map(c=>c.text||"").join("")||"");
+  return repairJSON(txt);
+}
+
+// ─── STORAGE HELPERS ───
+async function dbGet(k){try{const v=localStorage.getItem("cl_"+k);return v?JSON.parse(v):null}catch{return null}}
+async function dbSet(k,v){try{localStorage.setItem("cl_"+k,JSON.stringify(v));return true}catch{return false}}
+
+// ═══════════════════════════════════════════════════════════════
+// SHARED COMPONENTS
+// ═══════════════════════════════════════════════════════════════
+function OpsTable({cols,data,onChange,addLabel}){
+  const up=(i,f,v)=>{const n=[...data];n[i]={...n[i],[f]:v===""?"":isNaN(v)?v:v};onChange(n)};
+  const rm=i=>onChange(data.filter((_,j)=>j!==i));
+  const add=()=>{const row={};cols.forEach(c=>{if(!c.computed)row[c.key]=c.def!==undefined?c.def:""});onChange([...data,row])};
+  return(<div className="otw"><table className="ot"><thead><tr>{cols.filter(c=>!c.hidden).map(c=><th key={c.key} style={{width:c.w}}>{c.label}</th>)}<th style={{width:28}}/></tr></thead>
+    <tbody>{data.map((row,i)=><tr key={i}>{cols.filter(c=>!c.hidden).map(c=>{
+      if(c.computed){const v=c.computed(row);return <td key={c.key} className="ot-cost">{typeof v==="number"?(v>=0?"":"−")+"₹"+Math.abs(v).toFixed(2):v}</td>}
+      if(c.type==="select")return <td key={c.key}><select value={row[c.key]||""} onChange={e=>up(i,c.key,e.target.value)} className="ot-sel">{(c.options||[]).map(o=><option key={o} value={o}>{o}</option>)}</select></td>;
+      if(c.type==="number")return <td key={c.key}><input type="number" value={row[c.key]!=null?row[c.key]:""} onChange={e=>up(i,c.key,e.target.value)} className="ot-num" step={c.step||"0.1"}/></td>;
+      return <td key={c.key}><input value={row[c.key]||""} onChange={e=>up(i,c.key,e.target.value)} className="ot-txt" placeholder={c.ph||""}/></td>;
+    })}<td><button className="ot-rm" onClick={()=>rm(i)}>✕</button></td></tr>)}</tbody>
+    <tfoot><tr><td colSpan={cols.filter(c=>!c.hidden).length+1}><button className="ot-add" onClick={add}>+ {addLabel||"Add"}</button></td></tr></tfoot></table></div>);
+}
+function FileUpload({files,onChange}){const ref=useRef(null);return(<div>
+  <div className="fu" onClick={()=>ref.current?.click()}>
+  <input ref={ref} type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.xls,.xlsx,.csv" onChange={e=>{onChange([...files,...Array.from(e.target.files)]);e.target.value=""}} style={{display:"none"}}/>
+  <div style={{fontSize:20}}>📎</div><div style={{fontSize:12,fontWeight:500}}>Drop files or click to browse</div>
+  {files.length>0&&<div className="fu-chips" onClick={e=>e.stopPropagation()}>{files.map((f,i)=><span key={i} className="fu-chip">{f.name}<button onClick={()=>onChange(files.filter((_,j)=>j!==i))}>✕</button></span>)}</div>}
+  </div>
+  <div className="sec-badge"><span className="sec-badge-icon">🔒</span><span>Your data is processed securely — encrypted in transit, zero retention after analysis, never used for AI training</span></div>
+  </div>);
+}
+
+// ─── EBOOK COVER COMPONENT ───
+function EbookCover({book,size="md"}){
+  const w=size==="sm"?140:size==="lg"?240:180;const h=w*1.4;
+  const patterns={circles:`<circle cx="30" cy="30" r="20" fill="none" stroke="${book.accent}22" stroke-width="1"/><circle cx="70" cy="70" r="15" fill="none" stroke="${book.accent}33" stroke-width="1"/>`,hexagons:`<polygon points="50,5 95,27.5 95,72.5 50,95 5,72.5 5,27.5" fill="none" stroke="${book.accent}22" stroke-width="1"/>`,diamonds:`<rect x="25" y="25" width="50" height="50" transform="rotate(45,50,50)" fill="none" stroke="${book.accent}22" stroke-width="1"/>`,grid:`<line x1="0" y1="33" x2="100" y2="33" stroke="${book.accent}15" stroke-width="0.5"/><line x1="0" y1="66" x2="100" y2="66" stroke="${book.accent}15" stroke-width="0.5"/><line x1="33" y1="0" x2="33" y2="100" stroke="${book.accent}15" stroke-width="0.5"/><line x1="66" y1="0" x2="66" y2="100" stroke="${book.accent}15" stroke-width="0.5"/>`,waves:`<path d="M0,50 Q25,30 50,50 Q75,70 100,50" fill="none" stroke="${book.accent}22" stroke-width="1"/>`,dots:`<circle cx="20" cy="20" r="2" fill="${book.accent}33"/><circle cx="50" cy="40" r="2" fill="${book.accent}33"/><circle cx="80" cy="20" r="2" fill="${book.accent}33"/><circle cx="35" cy="70" r="2" fill="${book.accent}33"/><circle cx="65" cy="80" r="2" fill="${book.accent}33"/>`,triangles:`<polygon points="50,10 90,80 10,80" fill="none" stroke="${book.accent}22" stroke-width="1"/>`,lines:`<line x1="0" y1="20" x2="100" y2="40" stroke="${book.accent}15" stroke-width="0.5"/><line x1="0" y1="50" x2="100" y2="70" stroke="${book.accent}15" stroke-width="0.5"/><line x1="0" y1="80" x2="100" y2="100" stroke="${book.accent}15" stroke-width="0.5"/>`,squares:`<rect x="10" y="10" width="30" height="30" fill="none" stroke="${book.accent}22" stroke-width="1"/><rect x="60" y="60" width="30" height="30" fill="none" stroke="${book.accent}22" stroke-width="1"/>`,zigzag:`<polyline points="0,30 20,10 40,30 60,10 80,30 100,10" fill="none" stroke="${book.accent}22" stroke-width="1"/>`};
+  const svgPat=`data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">${patterns[book.pattern]||patterns.circles}</svg>`)}`;
+  const fs=size==="sm"?9:size==="lg"?13:11;const subFs=size==="sm"?7:size==="lg"?10:8;
+  return(
+    <div style={{width:w,height:h,background:book.bg,borderRadius:8,overflow:"hidden",position:"relative",boxShadow:"4px 4px 20px rgba(0,0,0,.4),inset 0 1px 0 rgba(255,255,255,.05)",cursor:"pointer",flexShrink:0,border:"1px solid rgba(255,255,255,.06)"}}>
+      <div style={{position:"absolute",inset:0,backgroundImage:`url("${svgPat}")`,backgroundSize:"60%",opacity:.6}}/>
+      <div style={{position:"absolute",bottom:0,left:0,right:0,height:"60%",background:`linear-gradient(to top,${book.bg},transparent)`}}/>
+      {book.tag&&<div style={{position:"absolute",top:8,right:0,background:book.accent,color:"#fff",fontSize:7,fontWeight:700,padding:"2px 8px 2px 6px",letterSpacing:.5,borderRadius:"3px 0 0 3px"}}>{book.tag}</div>}
+      <div style={{position:"absolute",top:10,left:10,background:book.accent,color:"#fff",width:size==="sm"?20:26,height:size==="sm"?20:26,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:size==="sm"?9:11,fontWeight:800,fontFamily:"IBM Plex Mono"}}>{book.id}</div>
+      <div style={{position:"absolute",bottom:0,left:0,right:0,padding:size==="sm"?"8px":"12px"}}>
+        <div style={{fontSize:7,fontWeight:600,color:book.accent,letterSpacing:1,textTransform:"uppercase",marginBottom:3}}>Procurement Excellence Series</div>
+        <div style={{fontSize:fs,fontWeight:700,color:"#fff",lineHeight:1.25,marginBottom:4,fontFamily:"'Bricolage Grotesque',sans-serif",display:"-webkit-box",WebkitLineClamp:3,WebkitBoxOrient:"vertical",overflow:"hidden"}}>{book.title}</div>
+        <div style={{background:book.accent+"cc",color:"#fff",fontSize:subFs,fontWeight:600,padding:"3px 6px",borderRadius:4,display:"inline-block",marginBottom:4,lineHeight:1.2}}>{book.sub}</div>
+        <div style={{fontSize:7,color:"rgba(255,255,255,.5)"}}>CostLens Publication</div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// HELP GUIDE — When to Use / How to Fill / What's Output
+// ═══════════════════════════════════════════════════════════════
+function HelpGuide({help}){
+  const[open,setOpen]=useState(false);
+  if(!help)return null;
+  return(<div className="help-zone"><button className="help-toggle" onClick={()=>setOpen(!open)}>💡 Quick Guide — When to use, how to fill, output explained {open?"▲":"▼"}</button>
+    {open&&<div className="help-panel">
+      <div className="help-section"><div className="help-icon">📌</div><div><div className="help-label">When to Use</div><div className="help-text">{help.when}</div></div></div>
+      <div className="help-section"><div className="help-icon">✍️</div><div><div className="help-label">How to Fill</div><ul className="help-list">{help.howTo.map((h,i)=><li key={i}>{h}</li>)}</ul></div></div>
+      <div className="help-section"><div className="help-icon">📊</div><div><div className="help-label">Output You Get</div><ul className="help-list">{help.output.map((o,i)=><li key={i}>{o}</li>)}</ul></div></div>
+      {help.tips&&<div className="help-section"><div className="help-icon">💡</div><div><div className="help-label">Pro Tips</div><ul className="help-list">{help.tips.map((t,i)=><li key={i}>{t}</li>)}</ul></div></div>}
+    </div>}</div>);
+}
+
+// ─── HELP CONTENT FOR SHOULD-COST & TOOL-COST ───
+const SC_HELP={when:"Use when you need to build a bottom-up zero-based cost for a manufactured component — before supplier negotiations, during new product development, or to validate an existing supplier's price. Ideal for machined, stamped, fabricated, or assembled parts.",howTo:["Upload an engineering drawing (PDF/image) OR load a template and edit manually","AI extracts complete process sheet: raw materials, operations, secondary ops","Review and adjust the process sheet — add/edit/delete any operations","Set Cost Parameters: overhead %, profit %, rejection %, inventory carry %, packaging, logistics, inspection — use AI-suggested benchmarks or apply industry presets","Click Calculate to get the final should-cost with complete breakdown"],output:["Raw Material cost per piece (material × weight × scrap factor)","Process cost per piece (sum of cycle time × machine rate)","Secondary operations, overheads, rejection, inventory, packaging, logistics, inspection","Supplier profit margin","Final should-cost per piece with volume-based pricing"],tips:["Get cycle times from your production engineering team or time-study data","Machine rates should include depreciation, power, operator, consumables","Use 'Apply Benchmark' buttons to load industry-standard cost parameters","Compare your should-cost vs. supplier quote to identify negotiation leverage","Rejection % varies: 1-2% for CNC, 3-5% for casting, 2-3% for forging"]};
+const TC_HELP={when:"Use when you need to estimate the cost of any new tool, die, mould, jig, fixture, or gauge — for new product launches, supplier quotation validation, or capex budgeting. Covers all types: press tools, injection moulds, die casting dies, forging dies, blow moulds, fixtures, and more.",howTo:["Select a pre-built template closest to your tool type (18 templates available) OR start blank","Fill Tool Steel: select steel grade, enter weight (kg) and ₹/kg rate","Build Operations Sheet: add each toolroom operation with estimated hours and ₹/hour rate","Add Bought-out Items: standard parts like guide pillars, springs, hot runners, ejectors","Set Tool Life (shots/cycles) at the bottom — this calculates amortized cost per piece","All templates include realistic hours and rates from Indian tool rooms"],output:["Material cost (steel weight × rate)","Machining cost (hours × rate for each operation)","Bought-out components total","Total tool cost","Amortized cost per piece (total ÷ tool life)"],tips:["Always get 3 quotes from tool makers and cross-check with your should-cost","Wire EDM and Sink EDM are usually the biggest cost drivers — verify hours carefully","Hot runner costs for injection moulds can be 20-40% of total mould cost","Tool life varies hugely: 50K for HPDC dies, 500K for progressive dies, 1M+ for injection moulds","Add 10-15% for trial corrections — first trial rarely produces perfect parts"]};
+
+// ═══════════════════════════════════════════════════════════════
+// GENERIC MODULE
+// ═══════════════════════════════════════════════════════════════
+// ─── SAMPLE OUTPUT PREVIEW ───
+function SamplePreview({data}){
+  const[open,setOpen]=useState(true);
+  if(!data)return null;
+  return(<div style={{marginTop:16,border:"1px dashed var(--s3)",borderRadius:10,overflow:"hidden",background:"var(--s1)"}}>
+    <button onClick={()=>setOpen(!open)} style={{width:"100%",padding:"10px 14px",background:"none",border:"none",cursor:"pointer",display:"flex",alignItems:"center",gap:8,fontFamily:"'DM Sans',sans-serif",fontSize:12,fontWeight:600,color:"var(--ac)"}}>
+      <span style={{fontSize:16}}>📊</span> Sample Output — What you'll get {open?"▲":"▼"}
+    </button>
+    {open&&<div style={{padding:"0 14px 14px"}}>
+      <div style={{fontSize:11,fontWeight:600,color:"var(--t1)",marginBottom:8,padding:"6px 10px",background:"var(--s2)",borderRadius:6}}>{data.title}</div>
+      <div style={{display:"grid",gap:3}}>
+        {data.rows.map((r,i)=><div key={i} style={{display:"flex",justifyContent:"space-between",padding:"4px 10px",fontSize:11,background:i%2===0?"transparent":"var(--s2)",borderRadius:4}}>
+          <span style={{color:"var(--t2)"}}>{r.l}</span>
+          <span style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:600,color:"var(--t1)"}}>{r.v}</span>
+        </div>)}
+      </div>
+      <div style={{borderTop:"2px solid var(--ac)",marginTop:8,paddingTop:8,display:"grid",gap:4}}>
+        {data.totals.map((t,i)=><div key={i} style={{display:"flex",justifyContent:"space-between",padding:"5px 10px",fontSize:11,fontWeight:t.hl?700:500,background:t.hl?"rgba(45,127,249,.08)":"transparent",borderRadius:4,border:t.hl?"1px solid rgba(45,127,249,.15)":"none"}}>
+          <span style={{color:t.hl?"var(--ac)":"var(--t2)"}}>{t.l}</span>
+          <span style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,color:t.hl?"var(--ac)":"var(--t1)"}}>{t.v}</span>
+        </div>)}
+      </div>
+      <div style={{fontSize:9,color:"var(--t3)",marginTop:8,textAlign:"center",fontStyle:"italic"}}>This is a sample — your actual output will reflect your inputs above</div>
+    </div>}
+  </div>);
+}
+
+function GenericModule({moduleId,onResult,credits,useCredit}){
+  const cfg0=MCFG[moduleId];if(!cfg0)return <div>Not configured</div>;
+  const[files,setFiles]=useState([]);const[notes,setNotes]=useState("");
+  const[ops,setOps]=useState([]);const[fields,setFields]=useState(()=>{const o={};cfg0.fields.forEach(f=>o[f.k]="");return o});
+  const[loading,setLoading]=useState(false);const[err,setErr]=useState("");const[showAI,setShowAI]=useState(false);
+  const setF=(k,v)=>setFields(f=>({...f,[k]:v}));
+  const loadTpl=k=>{const t=cfg0.templates[k];if(!t)return;setOps((t.ops||[]).map(o=>({...o})));if(t.cfg){const nf={};cfg0.fields.forEach(f=>nf[f.k]=t.cfg[f.k]!=null?t.cfg[f.k]:"");setFields(nf)}setErr("")};
+  const doAI=async()=>{if(!files.length||credits<1)return;setLoading(true);setErr("");try{useCredit();const ext=await callAI(files,cfg0.prompt,notes+"\n"+JSON.stringify(fields));const ok=Object.keys(ext).find(k=>Array.isArray(ext[k])&&ext[k].length>0);if(ok){setOps(ext[ok]);setShowAI(false)}else{setErr("AI returned no data. Try a clearer document or add more notes.")}}catch(e){setErr("AI extraction failed: "+e.message+". Please try again or contact admin if this persists.")}finally{setLoading(false)}};
+  const calc=()=>{const r=cfg0.calcFn(ops,fields);onResult({module:moduleId,name:fields[cfg0.fields[0]?.k]||notes||moduleId,date:new Date().toLocaleString("en-IN"),total:r.total,details:r,ops:[...ops],fields:{...fields},resultVal:cfg0.resultValFn?cfg0.resultValFn(r):("₹"+r.total.toFixed(2))})};
+  const r=cfg0.calcFn(ops,fields);const bars=cfg0.barFn(r,fields);
+  return(<div className="mod-edit">
+    {/* Help Guide */}
+    <HelpGuide help={cfg0.help}/>
+    {/* Template Picker */}
+    <div className="tpl-zone"><div className="tpl-title">Quick Start — Load a Template</div><div className="tpl-btns">{Object.entries(cfg0.templates).map(([k,t])=><button key={k} className="tpl-btn" onClick={()=>loadTpl(k)}>{t.label}</button>)}</div></div>
+    {/* Live Calc Bar */}
+    <div className="mod-bar">{bars.map((b,i)=><div key={i} className={`mod-stat ${b.hl?"hl":""}`}><span className="ms-l">{b.l}</span><span className="ms-v">{b.v}</span></div>)}</div>
+    {err&&<div className="mod-err">{err}</div>}
+    {/* Config Fields */}
+    <div className="route-grid">{cfg0.fields.map(f=><div key={f.k} className="mod-field"><label>{f.l}</label>
+      {f.t==="select"?<select value={fields[f.k]||""} onChange={e=>setF(f.k,e.target.value)}>{(f.opts||[]).map(o=><option key={o}>{o}</option>)}</select>
+      :f.t==="number"?<input type="number" value={fields[f.k]} onChange={e=>setF(f.k,e.target.value)} placeholder={f.ph||""}/>
+      :<input value={fields[f.k]} onChange={e=>setF(f.k,e.target.value)} placeholder={f.ph||""}/>}</div>)}</div>
+    {/* Operations Table */}
+    <div className="section-head">{cfg0.sectionTitle}</div>
+    <OpsTable cols={cfg0.cols} data={ops} onChange={setOps} addLabel={cfg0.addLabel}/>
+    {/* AI Assist (collapsible) */}
+    <div className="ai-assist-zone">
+      <button className="ai-toggle" onClick={()=>setShowAI(!showAI)}><span>🤖</span> AI Assist — extract from document {showAI?"▲":"▼"}</button>
+      {showAI&&<div className="ai-panel">
+        <div style={{fontSize:11,color:"var(--t2)",marginBottom:6}}>{cfg0.aiHint||"Upload a document for AI extraction"}</div>
+        <FileUpload files={files} onChange={setFiles}/>
+        <textarea className="mod-notes" value={notes} onChange={e=>setNotes(e.target.value)} placeholder="Any additional context for AI..."/>
+        {loading&&<div className="mod-loading">🤖 AI extracting data from document...</div>}
+        <button className="btn-pri" style={{fontSize:11}} onClick={doAI} disabled={loading||credits<1||!files.length}>{credits<1?"No AI Credits":files.length===0?"Select a file first":"Extract with AI (1 credit) →"}</button>
+      </div>}
+    </div>
+    {/* Calculate */}
+    <div className="mod-actions"><button className="btn-pri" onClick={calc} disabled={ops.length===0}>⚡ Calculate</button></div>
+    {/* Sample Output Preview */}
+    {cfg0.sampleOutput&&<SamplePreview data={cfg0.sampleOutput}/>}
+  </div>);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SHOULD-COST & TOOL-COST (multi-table custom modules)
+// ═══════════════════════════════════════════════════════════════
+function ShouldCostModule({onResult,credits,useCredit}){
+  const[step,setStep]=useState("input");const[files,setFiles]=useState([]);const[notes,setNotes]=useState("");
+  const[ops,setOps]=useState([]);const[rm,setRm]=useState([{mat:"Mild Steel / CRS",grade:"",wt:"",rate:"70"}]);const[sec,setSec]=useState([]);
+  const[loading,setLoading]=useState(false);const[err,setErr]=useState("");const[ext,setExt]=useState(null);
+  // ── Editable cost parameters with benchmarks ──
+  const[cp,setCp]=useState({ohPct:15,profitPct:8,rejectionPct:2,invCarryPct:1.5,packCost:0,logCost:0,inspCost:0});
+  const setCP=(k,v)=>setCp(p=>({...p,[k]:Number(v)||0}));
+  // Benchmark suggestions by manufacturing type
+  const BENCH={
+    "CNC Machining":{ohPct:15,profitPct:8,rejectionPct:1.5,invCarryPct:1.5,packCost:3,inspCost:2},
+    "Sheet Metal / Press":{ohPct:12,profitPct:8,rejectionPct:2,invCarryPct:1,packCost:1.5,inspCost:1},
+    "Casting (HPDC/GDC)":{ohPct:18,profitPct:10,rejectionPct:4,invCarryPct:2,packCost:5,inspCost:3},
+    "Forging":{ohPct:16,profitPct:8,rejectionPct:3,invCarryPct:1.5,packCost:4,inspCost:2},
+    "Plastic Injection":{ohPct:20,profitPct:10,rejectionPct:2.5,invCarryPct:1,packCost:1,inspCost:1.5},
+    "Fabrication / Welding":{ohPct:14,profitPct:8,rejectionPct:2,invCarryPct:1.5,packCost:5,inspCost:2},
+    "Assembly":{ohPct:10,profitPct:6,rejectionPct:1,invCarryPct:2,packCost:3,inspCost:2},
+    "Rubber / Polymer":{ohPct:18,profitPct:10,rejectionPct:3,invCarryPct:1,packCost:1,inspCost:1},
+    "General / Other":{ohPct:15,profitPct:8,rejectionPct:2,invCarryPct:1.5,packCost:2,inspCost:1.5},
+  };
+  const applyBench=(type)=>{const b=BENCH[type];if(b)setCp(p=>({...p,...b,logCost:p.logCost}))};
+  const loadTpl=k=>{const t=SC_T[k];if(!t)return;setOps(t.ops.map(o=>({...o})));setRm(t.rm.map(r=>({...r})));setSec(t.sec.map(s=>({...s})));setStep("edit")};
+  const doAI=async()=>{if(!files.length||credits<1)return;setLoading(true);setErr("");try{useCredit();const e=await callAI(files,SC_PROMPT,notes);setExt(e);if(e.processSheet)setOps(e.processSheet);if(e.secondaryOps)setSec(e.secondaryOps);if(e.components){const mg=new Map();e.components.forEach(c=>{const cat=c.materialCategory||"Mild Steel / CRS";if(mg.has(cat))mg.get(cat).wt+=((Number(c.weightKg)||0)*(Number(c.qty)||1));else mg.set(cat,{mat:cat,grade:c.grade||"",wt:(Number(c.weightKg)||0)*(Number(c.qty)||1),rate:String(matR(cat))})});setRm([...mg.values()].map(g=>({...g,wt:String(g.wt.toFixed(3))})))}
+    // AI benchmark suggestions
+    if(e.suggestedBenchmarks){const sb=e.suggestedBenchmarks;setCp(p=>({ohPct:sb.overheadPct||p.ohPct,profitPct:sb.profitPct||p.profitPct,rejectionPct:sb.rejectionPct||p.rejectionPct,invCarryPct:sb.inventoryCarryPct||p.invCarryPct,packCost:sb.packagingCostPerPc||p.packCost,logCost:sb.logisticsCostPerPc||p.logCost,inspCost:sb.inspectionCostPerPc||p.inspCost}))}
+    setStep("edit")}catch(e){setErr("AI extraction failed: "+e.message+". Please try again or contact admin if this persists.")}finally{setLoading(false)}};
+  const calc=()=>{
+    const ohR=cp.ohPct/100,prR=cp.profitPct/100,rejR=cp.rejectionPct/100,invR=cp.invCarryPct/100;
+    // RM with details
+    let rmT=0;const rmD=[];rm.forEach(r=>{const wt=Number(r.wt)||0,rate=Number(r.rate)||0,cost=wt*1.08*rate;rmT+=cost;if(wt>0)rmD.push(`${r.mat}${r.grade?" "+r.grade:""}: ${wt.toFixed(3)}kg × 1.08 × ₹${rate} = ₹${cost.toFixed(2)}`)});
+    // Process with details
+    let pT=0;const pD=[];ops.forEach(o=>{const cost=(Number(o.cycleTimeMin)||0)*(Number(o.ratePerMin)||0);pT+=cost;pD.push(`${o.operation}: ${o.cycleTimeMin}min × ₹${o.ratePerMin}/min = ₹${cost.toFixed(2)}`)});
+    const totalCycle=ops.reduce((s,o)=>s+(Number(o.cycleTimeMin)||0),0);
+    // Secondary
+    let sT=0;const sD=[];sec.forEach(s=>{const c=Number(s.costPerPiece)||0;sT+=c;sD.push(`${s.operation}: ₹${c.toFixed(2)}`)});
+    // Dynamic overheads & margins
+    const oh=(pT+sT)*ohR;
+    const baseCost=rmT+pT+sT+oh;
+    const rejCost=baseCost*rejR;
+    const invCost=baseCost*invR;
+    const packCost=Number(cp.packCost)||0;
+    const logCost=Number(cp.logCost)||0;
+    const inspCost=Number(cp.inspCost)||0;
+    const totalBeforeProfit=baseCost+rejCost+invCost+packCost+logCost+inspCost;
+    const pr=totalBeforeProfit*prR;
+    const tot=totalBeforeProfit+pr;
+    // Detailed breakdown
+    const bd={rawMaterial:{amount:rmT,details:rmD.join("; ")||"—"},processing:{amount:pT,details:`${ops.length} operations, ${totalCycle.toFixed(1)} min total`},secondary:{amount:sT,details:sD.length?sD.join("; "):"None"},overheads:{amount:oh,details:`${cp.ohPct}% × ₹${(pT+sT).toFixed(2)} = ₹${oh.toFixed(2)}`},rejection:{amount:rejCost,details:`${cp.rejectionPct}% × ₹${baseCost.toFixed(2)} = ₹${rejCost.toFixed(2)}`},inventoryCarry:{amount:invCost,details:`${cp.invCarryPct}% × ₹${baseCost.toFixed(2)} = ₹${invCost.toFixed(2)}`},packaging:{amount:packCost,details:packCost>0?`₹${packCost.toFixed(2)}/pc`:"—"},logistics:{amount:logCost,details:logCost>0?`₹${logCost.toFixed(2)}/pc`:"—"},inspection:{amount:inspCost,details:inspCost>0?`₹${inspCost.toFixed(2)}/pc`:"—"},profit:{amount:pr,details:`${cp.profitPct}% × ₹${totalBeforeProfit.toFixed(2)} = ₹${pr.toFixed(2)}`}};
+    // Volume slabs
+    const q=100000;const slabs={base:{volume:q,costPerPiece:tot}};
+    ["plus20","plus30","plus40"].forEach((sk,si)=>{const m=[1.2,1.3,1.4][si];const v=Math.round(q*m);const d=VOL_D[sk];const vRm=rmT*d.rm,vProc=pT*d.proc,vSec=sT*d.sec;const vOh=(vProc+vSec)*ohR;const vBase=vRm+vProc+vSec+vOh;const vTotBP=vBase+vBase*rejR+vBase*invR+packCost*0.95+logCost+inspCost;const vTot=vTotBP+vTotBP*prR;slabs[sk]={volume:v,costPerPiece:vTot,savingsPct:((tot-vTot)/tot)*100,rmDiscount:((1-d.rm)*100).toFixed(1)}});
+    // Weight + confidence
+    const totW=rm.reduce((s,r)=>s+(Number(r.wt)||0),0);
+    const confidence=ops.length>=8?"HIGH":ops.length>=4?"MEDIUM":"LOW";
+    const rmPct=tot>0?((rmT/tot)*100).toFixed(1):"0";
+    onResult({module:"should-cost",name:ext?.partName||notes||"Component",date:new Date().toLocaleString("en-IN"),total:tot,
+      partDescription:ext?.partDescription||"",estimatedWeight:`${totW.toFixed(2)} kg`,operationCount:ops.length,totalCycleMin:totalCycle,rmPct,confidence,
+      costBreakdown:bd,volumeSlabs:slabs,negotiationPoints:ext?.negotiationPoints||[],costParams:{...cp},
+      ops:[...ops],sec:[...sec],rm:[...rm],
+      details:{rm:rmT,proc:pT,sec:sT,oh,rejection:rejCost,invCarry:invCost,packaging:packCost,logistics:logCost,inspection:inspCost,profit:pr},resultVal:"₹"+tot.toFixed(2)})};
+  const opC=[{key:"operation",label:"Operation",w:130},{key:"machine",label:"Machine",w:90},{key:"cycleTimeMin",label:"Time(m)",type:"number",w:60,step:"0.1",def:0.5},{key:"ratePerMin",label:"₹/min",type:"number",w:60,step:"0.5",def:3},{key:"_c",label:"Cost",w:65,computed:r=>(Number(r.cycleTimeMin)||0)*(Number(r.ratePerMin)||0)}];
+  const secC=[{key:"operation",label:"Operation",w:180},{key:"costPerPiece",label:"₹/pc",type:"number",w:80,step:"0.5",def:5}];
+  const rmC=[{key:"mat",label:"Material",type:"select",w:140,options:MATS.map(m=>m.n)},{key:"grade",label:"Grade",w:80},{key:"wt",label:"Wt(kg)",type:"number",w:70,step:"0.001"},{key:"rate",label:"₹/kg",type:"number",w:70,step:"1",def:70}];
+  const pT=ops.reduce((s,o)=>s+(Number(o.cycleTimeMin)||0)*(Number(o.ratePerMin)||0),0),rmT=rm.reduce((s,r)=>s+(Number(r.wt)||0)*(Number(r.rate)||0)*1.08,0),sT2=sec.reduce((s,x)=>s+(Number(x.costPerPiece)||0),0),oh2=(pT+sT2)*(cp.ohPct/100),base2=rmT+pT+sT2+oh2,addl2=base2*(cp.rejectionPct/100)+base2*(cp.invCarryPct/100)+(cp.packCost||0)+(cp.logCost||0)+(cp.inspCost||0),tot2=(base2+addl2)*(1+cp.profitPct/100);
+  if(step==="input")return(<div className="mod-in"><HelpGuide help={SC_HELP}/>
+    <div className="tpl-zone"><div className="tpl-title">Quick Start — Load a Template</div><div className="tpl-btns">{Object.entries(SC_T).map(([k,t])=><button key={k} className="tpl-btn" onClick={()=>loadTpl(k)}>{t.label}</button>)}</div></div>
+    {/* AI Extract Section */}
+    <div style={{background:"rgba(45,127,249,.04)",border:"1px solid rgba(45,127,249,.12)",borderRadius:10,padding:14,marginBottom:12}}>
+      <div style={{fontSize:12,fontWeight:700,marginBottom:6,color:"var(--ac)"}}>🤖 AI Extract from Drawing/Document</div>
+      <div style={{fontSize:10,color:"var(--t2)",marginBottom:8}}>Upload an engineering drawing, BOM, or specification → AI builds the complete process sheet automatically</div>
+      <FileUpload files={files} onChange={setFiles}/>
+      <textarea className="mod-notes" value={notes} onChange={e=>setNotes(e.target.value)} placeholder="Part name, material, specs, any notes for AI..."/>
+      {loading&&<div className="mod-loading">🤖 Reading drawing and building process sheet...</div>}{err&&<div className="mod-err">{err}</div>}
+      <div className="mod-actions">
+        {files.length>0&&<button className="btn-pri" onClick={doAI} disabled={loading||credits<1}>{credits<1?"No AI Credits":"🤖 AI Extract Process Sheet (1 credit) →"}</button>}
+        <button className="btn-sec" onClick={()=>setStep("edit")}>✏️ Build Manually →</button>
+      </div>
+    </div>
+    <SamplePreview data={{title:"CNC Housing | Mild Steel | 0.85 kg | 8 operations",rows:[{l:"Raw Material (MS CRS × 1.08)",v:"₹64.26"},{l:"CNC Turning (3.5 min × ₹5.5/min)",v:"₹19.25"},{l:"CNC Milling (4.2 min × ₹6/min)",v:"₹25.20"},{l:"Drilling + Tapping (2.3 min)",v:"₹6.50"},{l:"Zinc Plating",v:"₹8.00"},{l:"Overhead (15% on process)",v:"₹8.84"},{l:"Rejection/Scrap (2%)",v:"₹2.64"},{l:"Inventory Carry (1.5%)",v:"₹1.98"},{l:"Packaging",v:"₹3.00"},{l:"Inspection/QC",v:"₹1.50"},{l:"Profit (8%)",v:"₹11.29"}],totals:[{l:"Should-Cost/Piece",v:"₹152.46",hl:1},{l:"Total Cycle Time",v:"10.0 min (8 ops)"},{l:"RM as % of Cost",v:"42.1%"},{l:"Volume +30% Price",v:"₹137.22 (10% less)"}]}}/>
+    </div>);
+  return(<div className="mod-edit">
+    <div className="mod-bar"><div className="mod-stat"><span className="ms-l">RM</span><span className="ms-v">₹{rmT.toFixed(0)}</span></div><div className="mod-stat"><span className="ms-l">Process</span><span className="ms-v">₹{pT.toFixed(0)}</span></div><div className="mod-stat"><span className="ms-l">OH+Addl</span><span className="ms-v">₹{(oh2+addl2).toFixed(0)}</span></div><div className="mod-stat hl"><span className="ms-l">Total</span><span className="ms-v">₹{tot2.toFixed(2)}</span></div></div>
+    <div className="section-head">💰 Raw Materials</div><OpsTable cols={rmC} data={rm} onChange={setRm} addLabel="Add Material"/>
+    <div className="section-head">🏭 Manufacturing Process Sheet ({ops.length} operations, {ops.reduce((s,o)=>s+(Number(o.cycleTimeMin)||0),0).toFixed(1)} min total)</div><OpsTable cols={opC} data={ops} onChange={setOps} addLabel="Add Operation"/>
+    <div className="section-head">🎨 Secondary Operations</div><OpsTable cols={secC} data={sec} onChange={setSec} addLabel="Add Finishing"/>
+    {/* ── Cost Parameters & Margins ── */}
+    <div className="section-head">📊 Cost Parameters & Margins <span style={{fontSize:9,fontWeight:400,color:"var(--t3)"}}>(editable — AI suggests benchmarks)</span></div>
+    <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:14,marginBottom:10}}>
+      <div style={{display:"flex",gap:6,marginBottom:10,flexWrap:"wrap"}}>
+        <span style={{fontSize:10,fontWeight:600,color:"var(--t2)",lineHeight:"26px"}}>Apply Benchmark:</span>
+        {Object.keys(BENCH).map(t=><button key={t} onClick={()=>applyBench(t)} style={{fontSize:9,padding:"4px 10px",borderRadius:6,border:"1px solid var(--s3)",background:"var(--bg)",color:"var(--t2)",cursor:"pointer",fontFamily:"DM Sans"}}>{t}</button>)}
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))",gap:8}}>
+        {[
+          {k:"ohPct",l:"Overhead %",hint:"On process cost",icon:"🏭"},
+          {k:"profitPct",l:"Profit Margin %",hint:"On total cost",icon:"💰"},
+          {k:"rejectionPct",l:"Rejection / Scrap %",hint:"Industry: 1-5%",icon:"🗑️"},
+          {k:"invCarryPct",l:"Inventory Carry %",hint:"Holding cost/yr",icon:"📦"},
+          {k:"packCost",l:"Packaging ₹/pc",hint:"Box/wrap/foam",icon:"📦",abs:true},
+          {k:"logCost",l:"Logistics ₹/pc",hint:"Freight to plant",icon:"🚚",abs:true},
+          {k:"inspCost",l:"Inspection ₹/pc",hint:"QC/testing",icon:"🔍",abs:true},
+        ].map(f=><div key={f.k} style={{background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:8,padding:8}}>
+          <div style={{fontSize:9,color:"var(--t3)",marginBottom:2}}>{f.icon} {f.l}</div>
+          <input type="number" value={cp[f.k]} onChange={e=>setCP(f.k,e.target.value)} step={f.abs?"0.5":"0.5"} style={{width:"100%",fontFamily:"IBM Plex Mono",fontSize:14,fontWeight:700,border:"1px solid var(--s3)",borderRadius:4,padding:"4px 6px",background:"var(--s1)",color:"var(--t1)"}}/>
+          <div style={{fontSize:8,color:"var(--t3)",marginTop:2}}>{f.hint}</div>
+        </div>)}
+      </div>
+      <div style={{marginTop:8,fontSize:9,color:"var(--t3)",fontStyle:"italic"}}>💡 Benchmarks are industry averages for Indian manufacturing. Adjust based on your supplier's location, scale, and capability.</div>
+    </div>
+    <div className="mod-actions"><button className="btn-sec" onClick={()=>setStep("input")}>← Back</button><button className="btn-pri" onClick={calc} disabled={ops.length===0}>⚡ Calculate Should-Cost</button></div></div>);
+}
+function ToolCostModule({onResult,credits,useCredit}){
+  const[step,setStep]=useState("input");const[files,setFiles]=useState([]);const[notes,setNotes]=useState("");
+  const[ops,setOps]=useState([]);const[rm,setRm]=useState([{mat:"D2 Tool Steel",grade:"D2",wt:"",rate:"320"}]);const[sec,setSec]=useState([]);const[tl,setTl]=useState("100000");
+  const[loading,setLoading]=useState(false);const[err,setErr]=useState("");
+  // ── Editable cost parameters with benchmarks ──
+  const[tp,setTp]=useState({ohPct:12,profitPct:10,trialPct:10,designRevPct:5,surfaceTreat:0,logistics:0,inspection:0});
+  const setTP=(k,v)=>setTp(p=>({...p,[k]:Number(v)||0}));
+  const TC_BENCH={
+    "Progressive Die":{ohPct:12,profitPct:10,trialPct:12,designRevPct:5,surfaceTreat:0,inspection:2000},
+    "Injection Mould (small)":{ohPct:15,profitPct:12,trialPct:10,designRevPct:8,surfaceTreat:5000,inspection:3000},
+    "Injection Mould (multi-cav)":{ohPct:15,profitPct:12,trialPct:15,designRevPct:10,surfaceTreat:10000,inspection:5000},
+    "HPDC / GDC Die":{ohPct:14,profitPct:10,trialPct:15,designRevPct:8,surfaceTreat:8000,inspection:4000},
+    "Forging Die":{ohPct:12,profitPct:8,trialPct:12,designRevPct:5,surfaceTreat:3000,inspection:2000},
+    "Blow / Compression Mould":{ohPct:14,profitPct:10,trialPct:10,designRevPct:6,surfaceTreat:4000,inspection:2000},
+    "Jig / Fixture / Gauge":{ohPct:10,profitPct:8,trialPct:8,designRevPct:3,surfaceTreat:0,inspection:3000},
+    "Blanking / Bending Die":{ohPct:12,profitPct:8,trialPct:10,designRevPct:5,surfaceTreat:0,inspection:1500},
+  };
+  const applyTCBench=(type)=>{const b=TC_BENCH[type];if(b)setTp(p=>({...p,...b,logistics:p.logistics}))};
+  const loadTpl=k=>{const t=TC_T[k];if(!t)return;setOps(t.ops.map(o=>({...o})));setRm(t.rm.map(r=>({...r})));setSec(t.sec.map(s=>({...s})));setStep("edit")};
+  const doAI=async()=>{if(!files.length||credits<1)return;setLoading(true);setErr("");try{useCredit();const ext=await callAI(files,TC_PROMPT,notes);if(ext.operationSheet)setOps(ext.operationSheet);if(ext.secondaryCosts)setSec(ext.secondaryCosts);setStep("edit")}catch(e){setErr("AI extraction failed: "+e.message+". Please try again or contact admin if this persists.")}finally{setLoading(false)}};  const calc=()=>{
+    let matT=0;rm.forEach(r=>matT+=(Number(r.wt)||0)*(Number(r.rate)||0));
+    let machT=0;ops.forEach(o=>machT+=(Number(o.hoursEstimate)||0)*(Number(o.ratePerHour)||0));
+    let buyT=0;sec.forEach(s=>buyT+=Number(s.cost)||0);
+    const baseCost=matT+machT+buyT;
+    const oh=machT*(tp.ohPct/100);
+    const trialCost=baseCost*(tp.trialPct/100);
+    const designRev=baseCost*(tp.designRevPct/100);
+    const surfTreat=Number(tp.surfaceTreat)||0;
+    const logCost=Number(tp.logistics)||0;
+    const inspCost=Number(tp.inspection)||0;
+    const totalBeforeProfit=baseCost+oh+trialCost+designRev+surfTreat+logCost+inspCost;
+    const profit=totalBeforeProfit*(tp.profitPct/100);
+    const total=totalBeforeProfit+profit;
+    const life=Number(tl)||100000;
+    const bd={material:{amount:matT,label:"Tool Steel / Material"},machining:{amount:machT,label:"Machining / Toolroom"},boughtOut:{amount:buyT,label:"Bought-out Components"},overhead:{amount:oh,label:"Factory Overhead ("+tp.ohPct+"%)"},trial:{amount:trialCost,label:"Trial & Correction ("+tp.trialPct+"%)"},designRev:{amount:designRev,label:"Design Revision ("+tp.designRevPct+"%)"},surfaceTreat:{amount:surfTreat,label:"Surface Treatment / Coating"},logistics:{amount:logCost,label:"Logistics / Transport"},inspection:{amount:inspCost,label:"Inspection / Certification"},profit:{amount:profit,label:"Toolmaker Profit ("+tp.profitPct+"%)"}};
+    onResult({module:"tool-cost",name:notes||"Tool/Die",date:new Date().toLocaleString("en-IN"),total,
+      details:{material:matT,machining:machT,boughtOut:buyT,overhead:oh,trial:trialCost,designRev,surfaceTreat:surfTreat,logistics:logCost,inspection:inspCost,profit,toolLife:life,amortizedPerPiece:total/life},
+      costBreakdownTC:bd,costParams:{...tp},ops:[...ops],rm:[...rm],sec:[...sec],tl:life,resultVal:"₹"+total.toFixed(0)})};
+  const opC=[{key:"operation",label:"Operation",w:140},{key:"hoursEstimate",label:"Hours",type:"number",w:60,step:"1",def:4},{key:"ratePerHour",label:"₹/hr",type:"number",w:70,step:"50",def:800},{key:"_c",label:"Cost",w:75,computed:r=>(Number(r.hoursEstimate)||0)*(Number(r.ratePerHour)||0)}];
+  const secC=[{key:"item",label:"Item",w:200},{key:"cost",label:"₹",type:"number",w:100,step:"100",def:1000}];
+  const rmC=[{key:"mat",label:"Steel",type:"select",w:140,options:MATS.filter(m=>m.n.includes("Steel")||m.n.includes("Iron")||m.n==="Other").map(m=>m.n)},{key:"wt",label:"Wt(kg)",type:"number",w:70,step:"1"},{key:"rate",label:"₹/kg",type:"number",w:70,step:"10",def:320}];
+  let matT2=0;rm.forEach(r=>matT2+=(Number(r.wt)||0)*(Number(r.rate)||0));let machT2=0;ops.forEach(o=>machT2+=(Number(o.hoursEstimate)||0)*(Number(o.ratePerHour)||0));let buyT2=0;sec.forEach(s=>buyT2+=Number(s.cost)||0);
+  const base2=matT2+machT2+buyT2,oh2=machT2*(tp.ohPct/100),addl2=base2*(tp.trialPct/100)+base2*(tp.designRevPct/100)+(tp.surfaceTreat||0)+(tp.logistics||0)+(tp.inspection||0),tot2=(base2+oh2+addl2)*(1+tp.profitPct/100);
+  if(step==="input")return(<div className="mod-in"><HelpGuide help={TC_HELP}/>
+    <div className="tpl-zone"><div className="tpl-title">Quick Start — Load a Template (18 tool types)</div><div className="tpl-btns">{Object.entries(TC_T).map(([k,t])=><button key={k} className="tpl-btn" onClick={()=>loadTpl(k)}>{t.label}</button>)}</div></div>
+    <div style={{background:"rgba(139,92,246,.04)",border:"1px solid rgba(139,92,246,.12)",borderRadius:10,padding:14,marginBottom:12}}>
+      <div style={{fontSize:12,fontWeight:700,marginBottom:6,color:"#8b5cf6"}}>🤖 AI Extract from Drawing/Document</div>
+      <div style={{fontSize:10,color:"var(--t2)",marginBottom:8}}>Upload tool/die/mould drawing → AI builds the complete operation sheet with hours and rates</div>
+      <FileUpload files={files} onChange={setFiles}/>
+      <textarea className="mod-notes" value={notes} onChange={e=>setNotes(e.target.value)} placeholder="Tool type, material, specs, any notes for AI..."/>
+      {loading&&<div className="mod-loading">🤖 Analyzing tool drawing...</div>}{err&&<div className="mod-err">{err}</div>}
+      <div className="mod-actions">
+        {files.length>0&&<button className="btn-pri" onClick={doAI} disabled={loading||credits<1}>{credits<1?"No AI Credits":"🤖 AI Extract Operations (1 credit) →"}</button>}
+        <button className="btn-sec" onClick={()=>setStep("edit")}>✏️ Build Manually →</button>
+      </div>
+    </div>
+    <SamplePreview data={{title:"Progressive Press Tool | D2 Steel | 250T Press | 500K life",rows:[{l:"Tool Steel (D2, 180kg × ₹320/kg)",v:"₹57,600"},{l:"CNC Milling (40 hrs × ₹800/hr)",v:"₹32,000"},{l:"Wire EDM (28 hrs × ₹1,200/hr)",v:"₹33,600"},{l:"Surface Grinding (12 hrs × ₹600/hr)",v:"₹7,200"},{l:"Heat Treatment",v:"₹8,500"},{l:"Guide Pillars + Springs",v:"₹12,400"},{l:"Factory OH (12%)",v:"₹3,840"},{l:"Trial & Correction (10%)",v:"₹15,130"},{l:"Profit (10%)",v:"₹17,027"}],totals:[{l:"Total Tool Cost",v:"₹1,87,297",hl:1},{l:"Tool Life",v:"500,000 shots"},{l:"Amortized/Piece",v:"₹0.37",hl:1}]}}/>
+    </div>);
+  return(<div className="mod-edit">
+    <div className="mod-bar"><div className="mod-stat"><span className="ms-l">Base</span><span className="ms-v">₹{base2.toFixed(0)}</span></div><div className="mod-stat"><span className="ms-l">OH+Addl</span><span className="ms-v">₹{(oh2+addl2).toFixed(0)}</span></div><div className="mod-stat hl"><span className="ms-l">Total</span><span className="ms-v">₹{tot2.toFixed(0)}</span></div><div className="mod-stat" style={{color:"#10b981"}}><span className="ms-l">Amort/pc</span><span className="ms-v">₹{(tot2/(Number(tl)||100000)).toFixed(2)}</span></div></div>
+    <div className="section-head">🪨 Tool Steel / Material</div><OpsTable cols={rmC} data={rm} onChange={setRm} addLabel="Add Material"/>
+    <div className="section-head">🔧 Machining Operations ({ops.length} items, {ops.reduce((s,o)=>s+(Number(o.hoursEstimate)||0),0)} hrs total)</div><OpsTable cols={opC} data={ops} onChange={setOps} addLabel="Add Operation"/>
+    <div className="section-head">🛒 Bought-out Components</div><OpsTable cols={secC} data={sec} onChange={setSec} addLabel="Add Item"/>
+    <div className="mod-field" style={{marginTop:6}}><label>Tool Life (shots/cycles)</label><input type="number" value={tl} onChange={e=>setTl(e.target.value)} style={{maxWidth:200}}/></div>
+    {/* ── Cost Parameters & Margins ── */}
+    <div className="section-head">📊 Cost Parameters & Margins <span style={{fontSize:9,fontWeight:400,color:"var(--t3)"}}>(editable — apply tool type benchmarks)</span></div>
+    <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:14,marginBottom:10}}>
+      <div style={{display:"flex",gap:6,marginBottom:10,flexWrap:"wrap"}}>
+        <span style={{fontSize:10,fontWeight:600,color:"var(--t2)",lineHeight:"26px"}}>Apply Benchmark:</span>
+        {Object.keys(TC_BENCH).map(t=><button key={t} onClick={()=>applyTCBench(t)} style={{fontSize:9,padding:"4px 10px",borderRadius:6,border:"1px solid var(--s3)",background:"var(--bg)",color:"var(--t2)",cursor:"pointer",fontFamily:"DM Sans"}}>{t}</button>)}
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))",gap:8}}>
+        {[
+          {k:"ohPct",l:"Overhead %",hint:"On machining cost",icon:"🏭"},
+          {k:"profitPct",l:"Toolmaker Profit %",hint:"On total cost",icon:"💰"},
+          {k:"trialPct",l:"Trial & Correction %",hint:"Typical: 8-15%",icon:"🔄"},
+          {k:"designRevPct",l:"Design Revision %",hint:"Typical: 3-10%",icon:"✏️"},
+          {k:"surfaceTreat",l:"Surface Treatment ₹",hint:"Nitriding/Chrome",icon:"🎨",abs:true},
+          {k:"logistics",l:"Logistics ₹",hint:"Transport to plant",icon:"🚚",abs:true},
+          {k:"inspection",l:"Inspection/Cert ₹",hint:"CMM report, cert",icon:"🔍",abs:true},
+        ].map(f=><div key={f.k} style={{background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:8,padding:8}}>
+          <div style={{fontSize:9,color:"var(--t3)",marginBottom:2}}>{f.icon} {f.l}</div>
+          <input type="number" value={tp[f.k]} onChange={e=>setTP(f.k,e.target.value)} step={f.abs?"500":"0.5"} style={{width:"100%",fontFamily:"IBM Plex Mono",fontSize:14,fontWeight:700,border:"1px solid var(--s3)",borderRadius:4,padding:"4px 6px",background:"var(--s1)",color:"var(--t1)"}}/>
+          <div style={{fontSize:8,color:"var(--t3)",marginTop:2}}>{f.hint}</div>
+        </div>)}
+      </div>
+      <div style={{marginTop:8,fontSize:9,color:"var(--t3)",fontStyle:"italic"}}>💡 Trial & Correction: first trial rarely produces perfect parts — budget 10-15% for moulds, 8-12% for press tools. Design revision covers engineering changes during tool development.</div>
+    </div>
+    <div className="mod-actions"><button className="btn-sec" onClick={()=>setStep("input")}>← Back</button><button className="btn-pri" onClick={calc} disabled={ops.length===0}>⚡ Calculate Tool Cost</button></div></div>);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// TRANSPORTATION COST MODULE — AI-Powered Indian Freight Calculator
+// ═══════════════════════════════════════════════════════════════
+const TRUCK_DB={
+  "Tata Ace (1T)":{payload:750,mileage:14,driverDay:800,loadUnload:1000,insurPct:0.1},
+  "Tata 407 (2.5T)":{payload:2200,mileage:10,driverDay:1000,loadUnload:1500,insurPct:0.1},
+  "Eicher 14ft (5T)":{payload:4500,mileage:7,driverDay:1200,loadUnload:2000,insurPct:0.1},
+  "Tata 1109 (9T)":{payload:8500,mileage:5.5,driverDay:1400,loadUnload:3000,insurPct:0.1},
+  "Tata 1612 (16T)":{payload:15000,mileage:4.5,driverDay:1500,loadUnload:4000,insurPct:0.08},
+  "Tata 2518 (25T)":{payload:22000,mileage:3.8,driverDay:1800,loadUnload:5000,insurPct:0.08},
+  "20ft Container":{payload:18000,mileage:4.2,driverDay:1600,loadUnload:5000,insurPct:0.08},
+  "40ft Trailer":{payload:26000,mileage:3.5,driverDay:2000,loadUnload:6000,insurPct:0.08},
+};
+
+// Common Indian routes with pre-filled distances and approx tolls
+const ROUTE_DB={
+  "Ludhiana→Delhi":{km:310,tolls:1200},"Delhi→Ludhiana":{km:310,tolls:1200},
+  "Ludhiana→Mumbai":{km:1580,tolls:4500},"Mumbai→Ludhiana":{km:1580,tolls:4500},
+  "Ludhiana→Chennai":{km:2350,tolls:6500},"Chennai→Ludhiana":{km:2350,tolls:6500},
+  "Ludhiana→Pune":{km:1630,tolls:4800},"Pune→Ludhiana":{km:1630,tolls:4800},
+  "Ludhiana→Kolkata":{km:1750,tolls:4200},"Kolkata→Ludhiana":{km:1750,tolls:4200},
+  "Ludhiana→Bangalore":{km:2400,tolls:6800},"Bangalore→Ludhiana":{km:2400,tolls:6800},
+  "Ludhiana→Jaipur":{km:650,tolls:1800},"Jaipur→Ludhiana":{km:650,tolls:1800},
+  "Ludhiana→Ahmedabad":{km:1150,tolls:3200},"Ahmedabad→Ludhiana":{km:1150,tolls:3200},
+  "Pune→Chennai":{km:1175,tolls:3200},"Chennai→Pune":{km:1175,tolls:3200},
+  "Pune→Mumbai":{km:150,tolls:400},"Mumbai→Pune":{km:150,tolls:400},
+  "Pune→Bangalore":{km:840,tolls:2400},"Bangalore→Pune":{km:840,tolls:2400},
+  "Pune→Delhi":{km:1450,tolls:4200},"Delhi→Pune":{km:1450,tolls:4200},
+  "Delhi→Mumbai":{km:1400,tolls:4000},"Mumbai→Delhi":{km:1400,tolls:4000},
+  "Delhi→Chennai":{km:2200,tolls:6000},"Chennai→Delhi":{km:2200,tolls:6000},
+  "Delhi→Kolkata":{km:1500,tolls:3800},"Kolkata→Delhi":{km:1500,tolls:3800},
+  "Delhi→Bangalore":{km:2150,tolls:6200},"Bangalore→Delhi":{km:2150,tolls:6200},
+  "Chennai→Mumbai":{km:1340,tolls:3600},"Mumbai→Chennai":{km:1340,tolls:3600},
+  "Chennai→Bangalore":{km:350,tolls:900},"Bangalore→Chennai":{km:350,tolls:900},
+  "Rajkot→Ludhiana":{km:1250,tolls:3500},"Ludhiana→Rajkot":{km:1250,tolls:3500},
+  "Rajkot→Pune":{km:800,tolls:2200},"Pune→Rajkot":{km:800,tolls:2200},
+  "Coimbatore→Chennai":{km:510,tolls:1400},"Chennai→Coimbatore":{km:510,tolls:1400},
+  "Hyderabad→Chennai":{km:630,tolls:1800},"Chennai→Hyderabad":{km:630,tolls:1800},
+  "Ahmedabad→Mumbai":{km:530,tolls:1500},"Mumbai→Ahmedabad":{km:530,tolls:1500},
+};
+
+const DIESEL_RATE=92; // ₹/litre — update periodically
+
+const TRANS_HELP={when:"Use when you need the exact freight cost per piece for any route in India — for landed cost, supplier comparison (ex-works vs FOR), logistics optimization, or transport tender evaluation.",howTo:["Enter origin city and destination city — distance and tolls auto-fill for 50+ common routes","Select truck type — payload, mileage, driver cost auto-loaded from benchmarks","Choose Spot or Contract rate, enter total weight and pieces per load","AI auto-calculates: diesel, tolls, driver, loading, insurance, overhead — all from Indian benchmarks","Review the breakdown, adjust any line item, then Calculate for ₹/piece","Check Cost Reduction Tips for alternate logistics strategies"],output:["Complete trip cost breakdown (diesel, toll, driver, loading, insurance, OH)","₹/kg rate and ₹/piece rate","Contract vs Spot comparison","AI-powered cost reduction suggestions for your specific route"],tips:["Always compare FTL vs PTL — below 60% payload, PTL is cheaper","Contract rates are typically 10-15% lower than spot for regular routes","Multi-pickup (milk run) can reduce per-piece cost by 20-30%","Rail freight is 40-60% cheaper for >1000km — check CONCOR availability","Diesel is 55-65% of freight cost — mileage matters more than truck size"]};
+
+function TransportCostModule({onResult,credits,useCredit}){
+  const[step,setStep]=useState("input");const[loading,setLoading]=useState(false);const[err,setErr]=useState("");
+  const[files,setFiles]=useState([]);const[notes,setNotes]=useState("");
+  // Route inputs
+  const[origin,setOrigin]=useState("");const[dest,setDest]=useState("");
+  const[distKm,setDistKm]=useState(0);const[tollEst,setTollEst]=useState(0);
+  const[truck,setTruck]=useState("Tata 1612 (16T)");
+  const[rateType,setRateType]=useState("spot");const[contractMonths,setContractMonths]=useState(12);
+  const[totalWt,setTotalWt]=useState(0);const[pcsLoad,setPcsLoad]=useState(0);
+  // Cost breakdown (editable)
+  const[costs,setCosts]=useState([]);
+  const[cp,setCp]=useState({ohPct:12,returnEmptyPct:0,contractDisc:0,transitDays:1,dieselRate:DIESEL_RATE});
+  const setCP=(k,v)=>setCp(p=>({...p,[k]:Number(v)||0}));
+
+  // Auto-fill distance when origin+dest entered
+  const tryAutoFill=(o,d)=>{
+    if(!o||!d)return;
+    const norm=s=>(s||"").toLowerCase().replace(/[,\s]+/g,"").replace(/→/g,"");
+    const oN=norm(o),dN=norm(d);
+    // Try exact match first
+    const exactKey=Object.keys(ROUTE_DB).find(k=>{const parts=k.split("→");return norm(parts[0])===oN&&norm(parts[1])===dN});
+    if(exactKey){setDistKm(ROUTE_DB[exactKey].km);setTollEst(ROUTE_DB[exactKey].tolls);return}
+    // Reverse match
+    const revKey=Object.keys(ROUTE_DB).find(k=>{const parts=k.split("→");return norm(parts[0])===dN&&norm(parts[1])===oN});
+    if(revKey){setDistKm(ROUTE_DB[revKey].km);setTollEst(ROUTE_DB[revKey].tolls);return}
+    // Fuzzy: first word of each city
+    const oW=o.toLowerCase().split(/[\s,]/)[0],dW=d.toLowerCase().split(/[\s,]/)[0];
+    if(oW.length>=3&&dW.length>=3){const fuzzy=Object.keys(ROUTE_DB).find(k=>k.toLowerCase().includes(oW)&&k.toLowerCase().includes(dW));
+      if(fuzzy){setDistKm(ROUTE_DB[fuzzy].km);setTollEst(ROUTE_DB[fuzzy].tolls);return}
+      // Reverse fuzzy
+      const rFuzzy=Object.keys(ROUTE_DB).find(k=>k.toLowerCase().includes(dW)&&k.toLowerCase().includes(oW));
+      if(rFuzzy){setDistKm(ROUTE_DB[rFuzzy].km);setTollEst(ROUTE_DB[rFuzzy].tolls)}}
+  };
+  const onOriginChange=v=>{setOrigin(v);if(v.length>=3&&dest.length>=3)tryAutoFill(v,dest)};
+  const onDestChange=v=>{setDest(v);if(origin.length>=3&&v.length>=3)tryAutoFill(origin,v)};
+
+  // Build cost breakdown from benchmarks
+  const buildCosts=()=>{
+    const tk=TRUCK_DB[truck]||TRUCK_DB["Tata 1612 (16T)"];
+    const km=Number(distKm)||0;const dr=Number(cp.dieselRate)||DIESEL_RATE;
+    const days=Math.max(1,Math.ceil(km/400));
+    setCp(p=>({...p,transitDays:days}));
+    const diesel=Math.round(km/tk.mileage*dr);
+    const tolls=Number(tollEst)||Math.round(km*2.5);
+    const driver=days*tk.driverDay;
+    const loadUnload=tk.loadUnload;
+    const loadVal=totalWt>0?(totalWt*(Number(cp.dieselRate)||90)*0.01):10000; // rough cargo value
+    const insur=Math.round(loadVal*tk.insurPct/100);
+    const items=[
+      {item:"Diesel",desc:`${km}km ÷ ${tk.mileage}km/l × ₹${dr}/l`,amount:diesel,cat:"fuel"},
+      {item:"Tolls (NHAI)",desc:`${km}km route — ${tollEst>0?"pre-filled":"estimated"}`,amount:tolls,cat:"toll"},
+      {item:"Driver + DA",desc:`${days} day(s) × ₹${tk.driverDay}/day`,amount:driver,cat:"driver"},
+      {item:"Loading + Unloading",desc:"Both ends — labour + equipment",amount:loadUnload,cat:"loading"},
+      {item:"Transit Insurance",desc:`${tk.insurPct}% of cargo value`,amount:Math.max(insur,200),cat:"insurance"},
+    ];
+    if(Number(cp.returnEmptyPct)>0)items.push({item:"Return Empty",desc:`${cp.returnEmptyPct}% of one-way cost`,amount:Math.round(diesel*cp.returnEmptyPct/100),cat:"overhead"});
+    setCosts(items);setStep("edit");
+  };
+
+  const doAI=async()=>{if(!files.length||credits<1)return;setLoading(true);setErr("");try{useCredit();
+    const prompt=`Indian logistics cost analyst. Extract from this transporter quotation/freight bill. If it's a product drawing, estimate freight for shipping this from ${origin||"supplier"} to ${dest||"plant"} using ${truck}.
+RESPOND ONLY VALID JSON: {"origin":"city","destination":"city","distanceKm":0,"vehicleType":"str","costs":[{"item":"str","desc":"str","amount":0,"cat":"fuel|toll|driver|loading|insurance|overhead"}],"suggestedTruck":"str","alternateRoutes":["suggestion"],"costReductionTips":["tip"]}`;
+    const e=await callAI(files,prompt,notes+" Route: "+(origin||"?")+" to "+(dest||"?")+" Weight: "+totalWt+"kg Pieces: "+pcsLoad);
+    if(e.origin&&!origin)setOrigin(e.origin);if(e.destination&&!dest)setDest(e.destination);
+    if(e.distanceKm)setDistKm(e.distanceKm);if(e.costs)setCosts(e.costs);
+    setStep("edit")}catch(e){setErr("AI extraction failed: "+e.message+". Please try again or contact admin if this persists.")}finally{setLoading(false)}};
+
+  // Live totals
+  const tripTotal=costs.reduce((s,c)=>s+(Number(c.amount)||0),0);
+  const ohAmt=Math.round(tripTotal*(cp.ohPct/100));
+  const contractDisc=rateType==="contract"?Math.round((tripTotal+ohAmt)*(cp.contractDisc/100)):0;
+  const grandTotal=tripTotal+ohAmt-contractDisc;
+  const perKg=totalWt>0?grandTotal/totalWt:0;
+  const perPiece=pcsLoad>0?grandTotal/pcsLoad:0;
+
+  const calc=()=>{
+    const bd=costs.map(c=>({...c}));
+    if(ohAmt>0)bd.push({item:"Transporter OH+Profit",desc:`${cp.ohPct}% on trip cost`,amount:ohAmt,cat:"overhead"});
+    if(contractDisc>0)bd.push({item:"Contract Discount",desc:`${cp.contractDisc}% for ${contractMonths}mo commitment`,amount:-contractDisc,cat:"discount"});
+    // Cost reduction suggestions
+    const tips=[];
+    if(distKm>1000)tips.push("🚂 Check rail freight (CONCOR) — typically 40-60% cheaper for >1000km routes");
+    if(totalWt>0&&totalWt<TRUCK_DB[truck]?.payload*0.6)tips.push("📦 Load utilization is below 60% — consider smaller truck or consolidate with other shipments (milk run)");
+    if(rateType==="spot")tips.push("📝 Switch to contract rate ("+contractMonths+"mo) — typical saving 10-15% vs spot rates for regular routes");
+    if(distKm>500)tips.push("🔄 Negotiate return load — if transporter gets return cargo, one-way rate drops 15-20%");
+    tips.push("⛽ Diesel is "+Math.round(costs.find(c=>c.cat==="fuel")?.amount/tripTotal*100||55)+"% of your freight — verify mileage claim with GPS tracking");
+    if(distKm<300)tips.push("🚚 For <300km, compare with LTL courier rates (Delhivery, Gati) — sometimes cheaper than FTL");
+    if(pcsLoad>0&&perPiece>20)tips.push("📦 At ₹"+perPiece.toFixed(1)+"/pc, packaging optimization could reduce box size → more pieces/truck → lower freight/pc");
+
+    onResult({module:"transport",name:`${origin||"Origin"} → ${dest||"Destination"}`,date:new Date().toLocaleString("en-IN"),total:grandTotal,
+      route:{origin,dest,distKm,truck,rateType,contractMonths,totalWt,pcsLoad,transitDays:cp.transitDays},
+      costBreakdown:bd,perKg,perPiece,costReductionTips:tips,costParams:{...cp},
+      details:{tripCost:tripTotal,overhead:ohAmt,contractDisc,grandTotal},resultVal:"₹"+perPiece.toFixed(2)+"/pc"})};
+
+  const costC=[{key:"item",label:"Item",w:140},{key:"desc",label:"Calculation Basis",w:200},{key:"amount",label:"₹",type:"number",w:90,step:"100"},{key:"cat",label:"Type",type:"select",w:80,options:["fuel","toll","driver","loading","insurance","overhead","other"]}];
+
+  const cities=["Ludhiana","Delhi","Mumbai","Pune","Chennai","Bangalore","Kolkata","Ahmedabad","Rajkot","Jaipur","Hyderabad","Coimbatore","Noida","Gurgaon","Faridabad","Sonepat","Panipat","Chandigarh","Indore","Nagpur","Surat","Vadodara","Bhopal","Kanpur","Lucknow","Patna","Ranchi","Visakhapatnam","Nashik","Aurangabad"];
+
+  if(step==="input")return(<div className="mod-in"><HelpGuide help={TRANS_HELP}/>
+    <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:14,marginBottom:12}}>
+      <div style={{fontSize:13,fontWeight:700,marginBottom:10}}>🚛 Route & Load Details</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+        <div className="mod-field"><label>📍 Origin City</label><input value={origin} onChange={e=>onOriginChange(e.target.value)} onBlur={()=>{if(origin&&dest)tryAutoFill(origin,dest)}} list="city-list" placeholder="e.g. Ludhiana"/></div>
+        <div className="mod-field"><label>📍 Destination City</label><input value={dest} onChange={e=>onDestChange(e.target.value)} onBlur={()=>{if(origin&&dest)tryAutoFill(origin,dest)}} list="city-list" placeholder="e.g. Chennai"/></div>
+        <datalist id="city-list">{cities.map(c=><option key={c} value={c}/>)}</datalist>
+      </div>
+      {distKm>0&&<div style={{background:"rgba(16,185,129,.06)",border:"1px solid rgba(16,185,129,.15)",borderRadius:8,padding:8,marginBottom:10,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <span style={{fontSize:11,color:"var(--ok)"}}>✅ Route found: <b>{distKm} km</b> | Approx tolls: <b>₹{tollEst.toLocaleString()}</b></span>
+        <span style={{fontSize:9,color:"var(--t3)"}}>Auto-filled from 50+ route database</span>
+      </div>}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:10}}>
+        <div className="mod-field"><label>Distance (km)</label><input type="number" value={distKm} onChange={e=>setDistKm(Number(e.target.value))}/></div>
+        <div className="mod-field"><label>Est. Tolls (₹)</label><input type="number" value={tollEst} onChange={e=>setTollEst(Number(e.target.value))}/></div>
+        <div className="mod-field"><label>Diesel ₹/litre</label><input type="number" value={cp.dieselRate} onChange={e=>setCP("dieselRate",e.target.value)} step="1"/></div>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+        <div className="mod-field"><label>🚛 Truck Type</label><select value={truck} onChange={e=>setTruck(e.target.value)}>{Object.keys(TRUCK_DB).map(t=><option key={t} value={t}>{t} — {TRUCK_DB[t].payload.toLocaleString()}kg, {TRUCK_DB[t].mileage}km/l</option>)}</select></div>
+        <div className="mod-field"><label>Spot / Contract</label><select value={rateType} onChange={e=>setRateType(e.target.value)}><option value="spot">Spot Rate (one-off)</option><option value="contract">Contract Rate (regular)</option></select></div>
+      </div>
+      {rateType==="contract"&&<div className="mod-field" style={{maxWidth:200}}><label>Contract Period (months)</label><input type="number" value={contractMonths} onChange={e=>setContractMonths(Number(e.target.value))}/></div>}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+        <div className="mod-field"><label>Total Load Weight (kg)</label><input type="number" value={totalWt} onChange={e=>setTotalWt(Number(e.target.value))} placeholder="e.g. 14000"/></div>
+        <div className="mod-field"><label>Pieces per Load</label><input type="number" value={pcsLoad} onChange={e=>setPcsLoad(Number(e.target.value))} placeholder="e.g. 6000"/></div>
+      </div>
+    </div>
+    {/* AI Section */}
+    <div style={{background:"rgba(245,158,11,.04)",border:"1px solid rgba(245,158,11,.12)",borderRadius:10,padding:14,marginBottom:12}}>
+      <div style={{fontSize:12,fontWeight:700,marginBottom:6,color:"#f59e0b"}}>🤖 AI Extract from Transporter Quote / Freight Bill</div>
+      <div style={{fontSize:10,color:"var(--t2)",marginBottom:8}}>Upload a transporter quotation, LR copy, or freight bill → AI extracts all cost items</div>
+      <FileUpload files={files} onChange={setFiles}/>
+      <textarea className="mod-notes" value={notes} onChange={e=>setNotes(e.target.value)} placeholder="Any special requirements — ODC, fragile, temperature controlled..."/>
+      {loading&&<div className="mod-loading">🤖 Analyzing freight document...</div>}{err&&<div className="mod-err">{err}</div>}
+    </div>
+    <div className="mod-actions">
+      <button className="btn-pri" onClick={()=>{if(!origin||!dest){setErr("Enter origin and destination");return}if(!distKm){tryAutoFill(origin,dest);setErr("Distance auto-filled — click again to build cost, or enter manually");return}buildCosts()}} disabled={!origin||!dest}>🚛 Build Freight Cost →</button>
+      {files.length>0&&<button className="btn-pri" style={{background:"#f59e0b"}} onClick={doAI} disabled={loading||credits<1}>🤖 AI Extract (1 credit) →</button>}
+    </div>
+    <SamplePreview data={{title:"Ludhiana → Chennai | 16T Truck | 2,350 km",rows:[{l:"Diesel (2350km ÷ 4.5km/l × ₹92)",v:"₹48,044"},{l:"Tolls (NHAI)",v:"₹6,500"},{l:"Driver (6 days × ₹1500)",v:"₹9,000"},{l:"Loading + Unloading",v:"₹4,000"},{l:"Insurance",v:"₹1,200"},{l:"OH + Profit (12%)",v:"₹8,249"},{l:"Contract Disc (−10%)",v:"−₹7,699"}],totals:[{l:"Trip Cost",v:"₹69,294",hl:1},{l:"₹/kg (14,000 kg)",v:"₹4.95"},{l:"₹/Piece (5,000 pcs)",v:"₹13.86",hl:1}]}}/>
+    </div>);
+
+  return(<div className="mod-edit">
+    <div className="mod-bar">
+      <div className="mod-stat"><span className="ms-l">Trip</span><span className="ms-v">₹{grandTotal.toLocaleString()}</span></div>
+      <div className="mod-stat"><span className="ms-l">₹/kg</span><span className="ms-v">₹{perKg.toFixed(2)}</span></div>
+      <div className="mod-stat hl"><span className="ms-l">₹/Piece</span><span className="ms-v">₹{perPiece.toFixed(2)}</span></div>
+      <div className="mod-stat"><span className="ms-l">Route</span><span className="ms-v" style={{fontSize:9}}>{origin?.split(",")[0]}→{dest?.split(",")[0]} ({distKm}km)</span></div>
+    </div>
+    <div style={{fontSize:11,color:"var(--t2)",marginBottom:8}}>🚛 <b>{truck}</b> | {totalWt.toLocaleString()} kg | {pcsLoad.toLocaleString()} pcs | {rateType==="contract"?contractMonths+"mo Contract":"Spot"} | {cp.transitDays} day(s) transit</div>
+    <div className="section-head">💰 Trip Cost Breakdown</div>
+    <OpsTable cols={costC} data={costs} onChange={setCosts} addLabel="Add Cost Item"/>
+    <div className="section-head">📊 Rate Parameters</div>
+    <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:14,marginBottom:10}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(130px,1fr))",gap:8}}>
+        {[{k:"ohPct",l:"Transporter OH+Profit %",v:cp.ohPct,h:"Margin: 10-15%"},
+          {k:"returnEmptyPct",l:"Return Empty %",v:cp.returnEmptyPct,h:"0 if return load available"},
+          {k:"contractDisc",l:"Contract Discount %",v:cp.contractDisc,h:rateType==="contract"?"10-15% typical":"N/A for spot"},
+        ].map(f=><div key={f.k} style={{background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:8,padding:8}}>
+          <div style={{fontSize:9,color:"var(--t3)",marginBottom:2}}>{f.l}</div>
+          <input type="number" value={f.v} onChange={e=>setCP(f.k,e.target.value)} step="1" style={{width:"100%",fontFamily:"IBM Plex Mono",fontSize:14,fontWeight:700,border:"1px solid var(--s3)",borderRadius:4,padding:"4px 6px",background:"var(--s1)",color:"var(--t1)"}}/>
+          <div style={{fontSize:8,color:"var(--t3)",marginTop:2}}>{f.h}</div>
+        </div>)}
+      </div>
+    </div>
+    <div className="mod-actions"><button className="btn-sec" onClick={()=>setStep("input")}>← Back</button><button className="btn-pri" onClick={calc}>⚡ Calculate Freight Cost</button></div>
+  </div>);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PACKAGING COST MODULE — Zero-Based Costing from Box Design / Spec
+// ═══════════════════════════════════════════════════════════════
+const PKG_HELP={when:"Use when you need to build a zero-based packaging cost per piece — for landed cost, supplier comparison, packaging optimization, or new product packaging design.",howTo:["Upload a box design drawing, packaging spec, or BOM → AI extracts dimensions, materials, and builds cost","Or load a template — 6 templates covering auto components, export, retail, bulk","Review Box section: dimensions L×W×H → deckle area auto-calculated → ply × rate/sqm = box cost","Review Primary items (VCI, foam, bubble wrap) and Tertiary (pallet, stretch wrap)","Set Labor & Cost Parameters: packing time, wastage %, supplier margin %","Click Calculate for complete per-piece packaging cost breakdown"],output:["Box cost from dimensions (L×W×H → deckle area → ply × rate/sqm)","Primary packaging itemized","Tertiary amortized per piece","Labor + QC cost","Total packaging ₹/piece with wastage and margin"],tips:["Get corrugated rates from corrugator directly — trader markup is 15-25%","VCI paper mandatory for metal parts export — ₹8-15/sqm","5-ply standard for auto, 7-ply for heavy/export, 3-ply for light items","Returnable packaging saves 40-60% over 12 months for regular routes"]};
+
+const PKG_PROMPT=`You are a senior packaging engineer with 20+ years in Indian manufacturing packaging. Build a ZERO-BASED PACKAGING COST model from the document.
+
+Extract:
+1. BOX: inner dimensions L×W×H (mm), ply (3/5/7), flute type, rate/sqm, pieces per box, boxes per pallet
+2. PRIMARY PACKAGING: each item with name, area (sqm) if applicable, rate/sqm, cost/piece
+3. TERTIARY: each item with name, cost per pallet, pieces per pallet, cost/piece
+4. LABOR: packing minutes per piece, labor rate ₹/min
+5. BENCHMARKS: wastagePct (5-10%), supplierMarginPct (8-15%)
+
+Box deckle area formula: ((2*(L+W)+40) * (W+H+20)) / 1000000 * 1.12
+Rates: 3-ply ₹14-18, 5-ply ₹24-32, 7-ply ₹38-48/sqm
+
+RESPOND ONLY VALID JSON:
+{"productName":"str","boxInnerL":300,"boxInnerW":200,"boxInnerH":150,"boxPly":"5-ply","boxFlute":"B-flute","boxRatePerSqm":28,"piecesPerBox":4,"boxesPerPallet":12,"primaryItems":[{"name":"VCI Paper","areaSqm":0.12,"ratePerSqm":12,"costPerPiece":1.44}],"tertiaryItems":[{"name":"Wooden Pallet","costPerPallet":500,"piecesPerPallet":48,"costPerPiece":10.42}],"packingLaborMin":0.8,"laborRatePerMin":4,"suggestedBenchmarks":{"wastagePct":8,"supplierMarginPct":10}}`;
+
+const PKG_TPL={
+  auto_small:{label:"⚙️ Auto Component (small)",box:{l:300,w:200,h:150,ply:"5-ply",flute:"B-flute",rate:28,pcsBox:4,boxPallet:16},
+    primary:[{name:"VCI Paper",area:0.12,rate:12,cost:1.44},{name:"PE Poly Bag",area:0,rate:0,cost:1.5},{name:"EPE Foam Insert",area:0,rate:0,cost:3.5}],
+    tertiary:[{name:"Wooden Pallet",costPallet:450,pcsPallet:64,cost:7.03},{name:"Stretch Wrap",costPallet:100,pcsPallet:64,cost:1.56}],labor:{min:0.5,rate:4}},
+  auto_large:{label:"🏭 Auto (large/heavy)",box:{l:500,w:350,h:300,ply:"7-ply",flute:"BC-flute",rate:42,pcsBox:1,boxPallet:8},
+    primary:[{name:"VCI Paper",area:0.35,rate:12,cost:4.2},{name:"EPE Foam (top+bottom)",area:0,rate:0,cost:8},{name:"Bubble Wrap",area:0.3,rate:8,cost:2.4},{name:"Desiccant Sachet",area:0,rate:0,cost:2}],
+    tertiary:[{name:"Pallet (heavy duty)",costPallet:650,pcsPallet:8,cost:81.25},{name:"Stretch Wrap",costPallet:120,pcsPallet:8,cost:15},{name:"Corner Protectors",costPallet:40,pcsPallet:8,cost:5}],labor:{min:2,rate:4}},
+  export:{label:"✈️ Export Packaging",box:{l:400,w:300,h:250,ply:"7-ply",flute:"BC-flute",rate:45,pcsBox:2,boxPallet:12},
+    primary:[{name:"VCI Paper (export)",area:0.24,rate:15,cost:3.6},{name:"EPE Foam Fitment",area:0,rate:0,cost:6},{name:"PE Bag (sealed)",area:0,rate:0,cost:2},{name:"Desiccant (2 sachets)",area:0,rate:0,cost:4},{name:"Humidity Indicator",area:0,rate:0,cost:3}],
+    tertiary:[{name:"Fumigated Pallet (ISPM-15)",costPallet:800,pcsPallet:24,cost:33.33},{name:"Stretch Wrap (3 layers)",costPallet:180,pcsPallet:24,cost:7.5},{name:"Steel Strapping",costPallet:60,pcsPallet:24,cost:2.5},{name:"Corner Protectors",costPallet:60,pcsPallet:24,cost:2.5}],labor:{min:3,rate:4.5}},
+  retail:{label:"🛍️ Retail / Consumer",box:{l:250,w:180,h:100,ply:"3-ply",flute:"E-flute",rate:16,pcsBox:1,boxPallet:48},
+    primary:[{name:"Printed Inner Tray",area:0,rate:0,cost:5},{name:"Foam Fitment",area:0,rate:0,cost:3},{name:"Manual/Warranty Card",area:0,rate:0,cost:1.5}],
+    tertiary:[{name:"Master Carton (12 pcs)",costPallet:0,pcsPallet:48,cost:2.5},{name:"Pallet",costPallet:400,pcsPallet:48,cost:8.33}],labor:{min:1.5,rate:4}},
+  bulk:{label:"📦 Bulk / Hardware",box:{l:600,w:400,h:350,ply:"5-ply",flute:"B-flute",rate:26,pcsBox:50,boxPallet:8},
+    primary:[{name:"PE Poly Bags",area:0,rate:0,cost:0.5},{name:"Oil Paper",area:0.05,rate:8,cost:0.4}],
+    tertiary:[{name:"Wooden Pallet",costPallet:500,pcsPallet:400,cost:1.25},{name:"Stretch Wrap",costPallet:100,pcsPallet:400,cost:0.25}],labor:{min:0.2,rate:3}},
+  blank:{label:"📝 Custom",box:{l:0,w:0,h:0,ply:"5-ply",flute:"B-flute",rate:28,pcsBox:1,boxPallet:1},primary:[],tertiary:[],labor:{min:0,rate:4}},
+};
+
+function PackagingCostModule({onResult,credits,useCredit}){
+  const[step,setStep]=useState("input");const[files,setFiles]=useState([]);const[notes,setNotes]=useState("");
+  const[loading,setLoading]=useState(false);const[err,setErr]=useState("");const[ext,setExt]=useState(null);
+  const[box,setBox]=useState({l:300,w:200,h:150,ply:"5-ply",flute:"B-flute",rate:28,pcsBox:4,boxPallet:16});
+  const setB=(k,v)=>setBox(b=>({...b,[k]:v}));
+  const[primary,setPrimary]=useState([{name:"VCI Paper",area:0.12,rate:12,cost:1.44}]);
+  const[tertiary,setTertiary]=useState([{name:"Wooden Pallet",costPallet:450,pcsPallet:64,cost:7.03}]);
+  const[labor,setLabor]=useState({min:0.5,rate:4});
+  const[cp,setCp]=useState({wastagePct:8,marginPct:10,logCost:0,qcMin:0,qcRate:3});
+  const setCP=(k,v)=>setCp(p=>({...p,[k]:Number(v)||0}));
+
+  const deckle=()=>{const L=Number(box.l)||0,W=Number(box.w)||0,H=Number(box.h)||0;if(!L||!W||!H)return 0;return((2*(L+W)+40)*(W+H+20)/1000000)*1.12};
+  const boxCostEach=()=>deckle()*(Number(box.rate)||0);
+  const boxCostPP=()=>{const ppb=Number(box.pcsBox)||1;return boxCostEach()/ppb};
+  const loadTpl=k=>{const t=PKG_TPL[k];if(!t)return;setBox({...t.box});setPrimary(t.primary.map(p=>({...p})));setTertiary(t.tertiary.map(t=>({...t})));setLabor({...t.labor});setStep("edit")};
+  const doAI=async()=>{if(!files.length||credits<1)return;setLoading(true);setErr("");try{useCredit();const e=await callAI(files,PKG_PROMPT,notes);setExt(e);
+    if(e.boxInnerL)setBox(b=>({...b,l:e.boxInnerL||b.l,w:e.boxInnerW||b.w,h:e.boxInnerH||b.h,ply:e.boxPly||b.ply,flute:e.boxFlute||b.flute,rate:e.boxRatePerSqm||b.rate,pcsBox:e.piecesPerBox||b.pcsBox,boxPallet:e.boxesPerPallet||b.boxPallet}));
+    if(e.primaryItems)setPrimary(e.primaryItems.map(p=>({name:p.name,area:p.areaSqm||0,rate:p.ratePerSqm||0,cost:p.costPerPiece||0})));
+    if(e.tertiaryItems)setTertiary(e.tertiaryItems.map(t=>({name:t.name,costPallet:t.costPerPallet||0,pcsPallet:t.piecesPerPallet||1,cost:t.costPerPiece||0})));
+    if(e.packingLaborMin)setLabor({min:e.packingLaborMin,rate:e.laborRatePerMin||4});
+    if(e.suggestedBenchmarks)setCp(p=>({...p,wastagePct:e.suggestedBenchmarks.wastagePct||p.wastagePct,marginPct:e.suggestedBenchmarks.supplierMarginPct||p.marginPct}));
+    setStep("edit")}catch(e){setErr("AI extraction failed: "+e.message+". Please try again or contact admin if this persists.")}finally{setLoading(false)}};
+
+  const priT=primary.reduce((s,p)=>s+(Number(p.cost)||0),0);
+  const secT=boxCostPP();
+  const terT=tertiary.reduce((s,t)=>s+(Number(t.cost)||0),0);
+  const labT=(Number(labor.min)||0)*(Number(labor.rate)||0)+(Number(cp.qcMin)||0)*(Number(cp.qcRate)||0);
+  const subT=priT+secT+terT+labT;
+  const wasteAmt=subT*(cp.wastagePct/100);
+  const beforeMargin=subT+wasteAmt+(Number(cp.logCost)||0);
+  const marginAmt=beforeMargin*(cp.marginPct/100);
+  const tot=beforeMargin+marginAmt;
+
+  const calc=()=>{
+    const bd={primary:{amount:priT,items:primary},secondary:{amount:secT,boxDims:`${box.l}×${box.w}×${box.h}mm`,ply:box.ply,deckleArea:deckle().toFixed(4),rate:box.rate,pcsBox:box.pcsBox},tertiary:{amount:terT,items:tertiary},labor:{amount:labT,packMin:labor.min,packRate:labor.rate},wastage:{amount:wasteAmt,pct:cp.wastagePct},logistics:{amount:Number(cp.logCost)||0},margin:{amount:marginAmt,pct:cp.marginPct}};
+    onResult({module:"packaging",name:ext?.productName||notes||"Packaging Cost",date:new Date().toLocaleString("en-IN"),total:tot,
+      costBreakdown:bd,costParams:{...cp,...labor},details:{primary:priT,secondary:secT,tertiary:terT,labor:labT,wastage:wasteAmt,logistics:Number(cp.logCost)||0,margin:marginAmt},resultVal:"₹"+tot.toFixed(2)})};
+
+  const priC=[{key:"name",label:"Item",w:150},{key:"area",label:"Area(sqm)",type:"number",w:80,step:"0.01"},{key:"rate",label:"₹/sqm",type:"number",w:70,step:"0.5"},{key:"cost",label:"₹/Piece",type:"number",w:80,step:"0.1"}];
+  const terC=[{key:"name",label:"Item",w:150},{key:"costPallet",label:"₹/Pallet",type:"number",w:80,step:"10"},{key:"pcsPallet",label:"Pcs/Plt",type:"number",w:70,step:"1"},{key:"cost",label:"₹/Piece",type:"number",w:80,step:"0.1"}];
+
+  if(step==="input")return(<div className="mod-in"><HelpGuide help={PKG_HELP}/>
+    <div className="tpl-zone"><div className="tpl-title">Quick Start — Load a Template</div><div className="tpl-btns">{Object.entries(PKG_TPL).map(([k,t])=><button key={k} className="tpl-btn" onClick={()=>loadTpl(k)}>{t.label}</button>)}</div></div>
+    <div style={{background:"rgba(16,185,129,.04)",border:"1px solid rgba(16,185,129,.12)",borderRadius:10,padding:14,marginBottom:12}}>
+      <div style={{fontSize:12,fontWeight:700,marginBottom:6,color:"#10b981"}}>🤖 AI Extract from Box Drawing / Packaging Spec</div>
+      <div style={{fontSize:10,color:"var(--t2)",marginBottom:8}}>Upload a box design, packaging BOM, or spec → AI extracts dimensions, materials, calculates deckle area & builds complete cost</div>
+      <FileUpload files={files} onChange={setFiles}/>
+      <textarea className="mod-notes" value={notes} onChange={e=>setNotes(e.target.value)} placeholder="Product name, weight, dimensions, fragility, export/domestic..."/>
+      {loading&&<div className="mod-loading">🤖 Analyzing packaging spec...</div>}{err&&<div className="mod-err">{err}</div>}
+      <div className="mod-actions">
+        {files.length>0&&<button className="btn-pri" onClick={doAI} disabled={loading||credits<1}>{credits<1?"No AI Credits":"🤖 AI Build Packaging Cost (1 credit) →"}</button>}
+        <button className="btn-sec" onClick={()=>setStep("edit")}>✏️ Build Manually →</button>
+      </div>
+    </div>
+    <SamplePreview data={{title:"CNC Housing | 0.85kg | 4 pcs/box | Export",rows:[{l:"Box: 300×200×150mm, 5-ply B-flute",v:"₹1.96"},{l:"VCI Paper (0.12sqm × ₹12)",v:"₹1.44"},{l:"EPE Foam Insert",v:"₹3.50"},{l:"Pallet (amortized ÷ 64 pcs)",v:"₹7.03"},{l:"Packing Labor (0.5 min × ₹4)",v:"₹2.00"},{l:"Wastage (8%)",v:"₹1.52"},{l:"Margin (10%)",v:"₹2.15"}],totals:[{l:"Packaging Cost / Piece",v:"₹22.66",hl:1},{l:"Primary",v:"₹6.44"},{l:"Box (from deckle calc)",v:"₹1.96"},{l:"Tertiary+Labor+OH",v:"₹14.26"}]}}/>
+  </div>);
+
+  return(<div className="mod-edit">
+    <div className="mod-bar">
+      <div className="mod-stat"><span className="ms-l">Primary</span><span className="ms-v">₹{priT.toFixed(1)}</span></div>
+      <div className="mod-stat"><span className="ms-l">Box</span><span className="ms-v">₹{secT.toFixed(1)}</span></div>
+      <div className="mod-stat"><span className="ms-l">Tertiary</span><span className="ms-v">₹{terT.toFixed(1)}</span></div>
+      <div className="mod-stat hl"><span className="ms-l">Total/Pc</span><span className="ms-v">₹{tot.toFixed(2)}</span></div>
+    </div>
+    <div className="section-head">📦 Box / Carton (Secondary)</div>
+    <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:14,marginBottom:10}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(105px,1fr))",gap:8,marginBottom:10}}>
+        {[{k:"l",l:"Length mm"},{k:"w",l:"Width mm"},{k:"h",l:"Height mm"}].map(f=>
+          <div key={f.k}><div style={{fontSize:9,color:"var(--t3)"}}>{f.l}</div>
+          <input type="number" value={box[f.k]} onChange={e=>setB(f.k,Number(e.target.value))} style={{width:"100%",fontFamily:"IBM Plex Mono",fontSize:14,fontWeight:700,border:"1px solid var(--s3)",borderRadius:4,padding:"4px 6px",background:"var(--bg)",color:"var(--t1)"}}/></div>)}
+        <div><div style={{fontSize:9,color:"var(--t3)"}}>Ply</div>
+          <select value={box.ply} onChange={e=>setB("ply",e.target.value)} style={{width:"100%",fontSize:12,border:"1px solid var(--s3)",borderRadius:4,padding:"5px",background:"var(--bg)",color:"var(--t1)"}}>
+            {["3-ply","5-ply","7-ply"].map(p=><option key={p}>{p}</option>)}</select></div>
+        <div><div style={{fontSize:9,color:"var(--t3)"}}>Flute</div>
+          <select value={box.flute} onChange={e=>setB("flute",e.target.value)} style={{width:"100%",fontSize:12,border:"1px solid var(--s3)",borderRadius:4,padding:"5px",background:"var(--bg)",color:"var(--t1)"}}>
+            {["E-flute","B-flute","C-flute","BC-flute"].map(f=><option key={f}>{f}</option>)}</select></div>
+        <div><div style={{fontSize:9,color:"var(--t3)"}}>₹/sqm</div>
+          <input type="number" value={box.rate} onChange={e=>setB("rate",Number(e.target.value))} step="0.5" style={{width:"100%",fontFamily:"IBM Plex Mono",fontSize:14,fontWeight:700,border:"1px solid var(--s3)",borderRadius:4,padding:"4px 6px",background:"var(--bg)",color:"var(--t1)"}}/></div>
+        <div><div style={{fontSize:9,color:"var(--t3)"}}>Pcs/Box</div>
+          <input type="number" value={box.pcsBox} onChange={e=>setB("pcsBox",Number(e.target.value))} style={{width:"100%",fontFamily:"IBM Plex Mono",fontSize:14,fontWeight:700,border:"1px solid var(--s3)",borderRadius:4,padding:"4px 6px",background:"var(--bg)",color:"var(--t1)"}}/></div>
+        <div><div style={{fontSize:9,color:"var(--t3)"}}>Boxes/Pallet</div>
+          <input type="number" value={box.boxPallet} onChange={e=>setB("boxPallet",Number(e.target.value))} style={{width:"100%",fontFamily:"IBM Plex Mono",fontSize:14,fontWeight:700,border:"1px solid var(--s3)",borderRadius:4,padding:"4px 6px",background:"var(--bg)",color:"var(--t1)"}}/></div>
+      </div>
+      <div style={{background:"rgba(16,185,129,.04)",border:"1px solid rgba(16,185,129,.12)",borderRadius:8,padding:10,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
+        <div style={{fontSize:11,color:"var(--t2)"}}>Deckle: <b style={{fontFamily:"IBM Plex Mono"}}>{deckle().toFixed(4)} sqm</b> × ₹{box.rate} = <b style={{fontFamily:"IBM Plex Mono",color:"var(--ac)"}}>₹{boxCostEach().toFixed(2)}/box</b></div>
+        <div style={{fontSize:13,fontWeight:800,fontFamily:"IBM Plex Mono",color:"var(--ok)"}}>₹{boxCostPP().toFixed(2)}/piece</div>
+      </div>
+      <div style={{fontSize:8,color:"var(--t3)",marginTop:4}}>Deckle = (2(L+W)+40) × (W+H+20) × 1.12. Rates: 3-ply ₹14-18, 5-ply ₹24-32, 7-ply ₹38-48/sqm</div>
+    </div>
+    <div className="section-head">🛡️ Primary Packaging (product contact)</div>
+    <OpsTable cols={priC} data={primary} onChange={setPrimary} addLabel="Add Primary Item"/>
+    <div className="section-head">🏗️ Tertiary (pallet/transport)</div>
+    <OpsTable cols={terC} data={tertiary} onChange={setTertiary} addLabel="Add Tertiary Item"/>
+    <div className="section-head">📊 Labor & Cost Parameters</div>
+    <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:14,marginBottom:10}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(125px,1fr))",gap:8}}>
+        {[{k:"min",l:"Pack Time (min/pc)",v:labor.min,fn:v=>setLabor(l=>({...l,min:Number(v)||0})),h:"Time per piece"},
+          {k:"rate",l:"Labor ₹/min",v:labor.rate,fn:v=>setLabor(l=>({...l,rate:Number(v)||0})),h:"₹3-5 typical"},
+          {k:"qcMin",l:"QC Check (min/pc)",v:cp.qcMin,fn:v=>setCP("qcMin",v),h:"Visual+dim check"},
+          {k:"qcRate",l:"QC Rate ₹/min",v:cp.qcRate,fn:v=>setCP("qcRate",v),h:"₹3-4 typical"},
+          {k:"wastagePct",l:"Wastage %",v:cp.wastagePct,fn:v=>setCP("wastagePct",v),h:"Box damage, tape"},
+          {k:"marginPct",l:"Supplier Margin %",v:cp.marginPct,fn:v=>setCP("marginPct",v),h:"Pkg supplier profit"},
+          {k:"logCost",l:"Logistics ₹/pc",v:cp.logCost,fn:v=>setCP("logCost",v),h:"Pkg to your plant"},
+        ].map(f=><div key={f.k} style={{background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:8,padding:8}}>
+          <div style={{fontSize:9,color:"var(--t3)",marginBottom:2}}>{f.l}</div>
+          <input type="number" value={f.v} onChange={e=>f.fn(e.target.value)} step="0.5" style={{width:"100%",fontFamily:"IBM Plex Mono",fontSize:14,fontWeight:700,border:"1px solid var(--s3)",borderRadius:4,padding:"4px 6px",background:"var(--s1)",color:"var(--t1)"}}/>
+          <div style={{fontSize:8,color:"var(--t3)",marginTop:2}}>{f.h}</div>
+        </div>)}
+      </div>
+    </div>
+    <div className="mod-actions"><button className="btn-sec" onClick={()=>setStep("input")}>← Back</button><button className="btn-pri" onClick={calc}>⚡ Calculate Packaging Cost</button></div>
+  </div>);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// RESULT VIEW
+// ═══════════════════════════════════════════════════════════════
+function ResultView({result,onBack,plan}){if(!result)return null;const mod=MODS.find(m=>m.id===result.module);const cfg=MCFG[result.module];
+  const isSC=result.module==="should-cost",isTC=result.module==="tool-cost";
+  const t=result.total||0;
+  // Smart action runner for module results
+  const[actRes,setActRes]=useState(null);const[actLd,setActLd]=useState(null);
+  const runModAction=async(action,context)=>{setActLd(action.t);setActRes(null);try{
+    const prompts={
+      "email":"Write a professional procurement/logistics email. Context: "+context+". Action: "+action.t+" — "+action.d+". Include subject line. Be specific with numbers from the analysis. Professional tone for Indian manufacturing.",
+      "brief":"Create a 1-page executive brief. Context: "+context+". Action: "+action.t+" — "+action.d+". Include: Summary, Key Data, Recommendation, Financial Impact, Next Steps. Use ₹ figures.",
+      "calc":"Do a detailed cost/savings calculation. Context: "+context+". Action: "+action.t+" — "+action.d+". Show numbers, formulas, comparison scenarios with ₹.",
+      "compare":"Create a detailed comparison analysis. Context: "+context+". Action: "+action.t+" — "+action.d+". Show side-by-side with ₹ figures, pros/cons, recommendation.",
+    };
+    const r=await apiFetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:API_HEADERS,
+      body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:4000,system:"You are a procurement & logistics expert for Indian manufacturing. Generate ready-to-use professional content with specific numbers.",messages:[{role:"user",content:prompts[action.type]||prompts.brief}]})});
+    if(!r.ok)throw new Error("API "+r.status);const d=await r.json();const txt=stripCites(d.content.filter(x=>x.type==="text").map(x=>x.text).join("\n"));
+    setActRes({title:action.t,type:action.type,content:txt})}catch(e){setActRes({title:action.t,type:"error",content:"Failed: "+e.message})}finally{setActLd(null)}};
+  // Smart action result display component
+  const ActionResult=()=>actRes?<div style={{marginTop:12,background:actRes.type==="error"?"rgba(239,68,68,.05)":"rgba(45,127,249,.05)",border:"1px solid "+(actRes.type==="error"?"rgba(239,68,68,.2)":"rgba(45,127,249,.2)"),borderRadius:14,padding:18}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+      <div style={{fontSize:13,fontWeight:700,color:actRes.type==="error"?"var(--err)":"var(--ac)"}}>{actRes.title}</div>
+      <div style={{display:"flex",gap:4}}>
+        <button onClick={()=>navigator.clipboard.writeText(actRes.content)} style={{fontSize:10,padding:"4px 10px",borderRadius:6,border:"1px solid var(--s3)",background:"var(--s2)",color:"var(--t2)",cursor:"pointer"}}>📋 Copy</button>
+        <button onClick={()=>setActRes(null)} style={{fontSize:10,padding:"4px 10px",borderRadius:6,border:"1px solid var(--s3)",background:"var(--s2)",color:"var(--t2)",cursor:"pointer"}}>✕ Close</button>
+      </div>
+    </div>
+    <div style={{fontSize:13,color:"var(--t1)",lineHeight:1.9,whiteSpace:"pre-wrap",fontFamily:actRes.type==="calc"?"monospace":"inherit"}}>{actRes.content}</div>
+  </div>:null;
+  // Reusable smart actions block
+  const SmartActionBlock=({actions,context})=><div style={{marginTop:14,marginBottom:14}}>
+    <div style={{fontSize:11,fontWeight:700,color:"var(--t3)",textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>⚡ Smart Actions</div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+      {actions.map((a,i)=><div key={i} onClick={()=>!actLd&&runModAction(a,context)} style={{background:"var(--s1)",border:"1px solid "+(actLd===a.t?"var(--ac)":"var(--s2)"),borderRadius:8,padding:10,cursor:actLd?"not-allowed":"pointer",opacity:actLd&&actLd!==a.t?0.5:1,transition:"border-color .2s"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div><span style={{marginRight:6}}>{a.icon}</span><span style={{fontSize:11,fontWeight:600}}>{a.t}</span></div>
+          {actLd===a.t?<div style={{width:14,height:14,border:"2px solid var(--ac)",borderTopColor:"transparent",borderRadius:"50%",animation:"saSpin 1s linear infinite"}}/>:<span style={{fontSize:9,padding:"3px 8px",borderRadius:6,background:"rgba(45,127,249,.15)",color:"var(--ac)",fontWeight:700}}>Run →</span>}
+        </div>
+        <div style={{fontSize:9,color:"var(--t3)",marginTop:2,marginLeft:22}}>{a.d}</div>
+      </div>)}
+    </div>
+    <ActionResult/>
+  </div>;
+
+  // Should-cost executive view
+  if(isSC&&result.costBreakdown){
+    const bd=result.costBreakdown,vs=result.volumeSlabs;
+    return(<div className="result-view">
+      {/* Executive Header */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14,flexWrap:"wrap",gap:10}}>
+        <div><div style={{fontSize:17,fontWeight:700,fontFamily:"'Bricolage Grotesque',sans-serif"}}>{result.name}</div>
+          {result.partDescription&&<div style={{color:"var(--t2)",fontSize:11,marginTop:2,maxWidth:420}}>{result.partDescription}</div>}
+        </div>
+        <div style={{background:"linear-gradient(135deg,rgba(37,99,235,.12),rgba(37,99,235,.04))",border:"1px solid rgba(37,99,235,.3)",borderRadius:9,padding:"10px 18px",textAlign:"center",minWidth:150}}>
+          <div style={{fontSize:9,textTransform:"uppercase",letterSpacing:1.5,color:"var(--t3)"}}>Should-Cost</div>
+          <div style={{fontFamily:"'IBM Plex Mono'",fontSize:22,fontWeight:700,color:"var(--ac)"}}>₹{t.toFixed(2)}</div>
+          <div style={{fontSize:9,color:"var(--t3)"}}>per piece • Base</div>
+        </div>
+      </div>
+      {/* Smart Badges */}
+      <div style={{display:"flex",gap:4,marginBottom:14,flexWrap:"wrap"}}>
+        <span className="rv-badge">⚖️ {result.estimatedWeight}</span>
+        <span className="rv-badge">🏭 {result.operationCount} operations</span>
+        <span className="rv-badge">⏱️ {result.totalCycleMin?.toFixed(1)}min cycle</span>
+        <span className="rv-badge" style={{background:"rgba(59,130,246,.08)",borderColor:"rgba(59,130,246,.3)",color:"#60a5fa"}}>💰 RM: {result.rmPct}%</span>
+        <span className={`rv-badge ${result.confidence==="HIGH"?"rv-badge-ok":result.confidence==="LOW"?"rv-badge-warn":"rv-badge-med"}`}>{result.confidence}</span>
+        <span className="rv-badge rv-badge-ok">Zero-Based</span>
+      </div>
+      {/* Volume Slabs */}
+      {vs&&<div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:1,background:"var(--s2)",border:"1px solid var(--s2)",borderRadius:8,overflow:"hidden",marginBottom:14}}>
+        {VOL_SLABS.map(sk=>{const s=vs[sk.key];if(!s)return null;return(<div key={sk.key} style={{background:"var(--s1)",padding:"8px 10px",textAlign:"center"}}>
+          <div style={{fontSize:8,color:"var(--t3)"}}>{sk.label} • {Number(s.volume).toLocaleString()}</div>
+          <div style={{fontFamily:"'IBM Plex Mono'",fontSize:14,fontWeight:700,marginTop:2}}>₹{s.costPerPiece?.toFixed(2)}</div>
+          {sk.key!=="base"&&s.savingsPct&&<div style={{fontSize:9,color:"#10b981"}}>▼ {s.savingsPct.toFixed(1)}%</div>}
+        </div>)})}
+      </div>}
+      {/* Cost Breakdown Table */}
+      <table className="rv-table"><thead><tr><th style={{textAlign:"left"}}>Element</th><th style={{textAlign:"right"}}>₹</th><th style={{textAlign:"right"}}>%</th><th style={{textAlign:"left"}}>Details</th></tr></thead>
+        <tbody>{SC_CATS.map(cat=>{const a=bd[cat.key]?.amount||0;if(a===0&&["secondary","rejection","inventoryCarry","packaging","logistics","inspection"].includes(cat.key))return null;return(<tr key={cat.key}><td><span style={{display:"inline-block",width:7,height:7,borderRadius:"50%",background:cat.color,marginRight:6,verticalAlign:"middle"}}/>{cat.label}</td><td style={{textAlign:"right",fontFamily:"'IBM Plex Mono'",fontWeight:600}}>₹{a.toFixed(2)}</td><td style={{textAlign:"right",color:"var(--t3)",fontSize:10}}>{t>0?((a/t)*100).toFixed(1):"0"}%</td><td style={{fontSize:10,color:"var(--t2)",maxWidth:300}}>{bd[cat.key]?.details||"—"}</td></tr>)})}</tbody>
+        <tfoot><tr style={{borderTop:"2px solid var(--ac)"}}><td style={{fontWeight:700}}>TOTAL</td><td style={{textAlign:"right",fontFamily:"'IBM Plex Mono'",fontWeight:700,color:"var(--ac)"}}>₹{t.toFixed(2)}</td><td style={{textAlign:"right",fontWeight:600}}>100%</td><td/></tr></tfoot></table>
+      {/* Process Sheet */}
+      {result.ops?.length>0&&<div style={{marginTop:14}}><div style={{fontSize:10,fontWeight:600,color:"var(--t3)",textTransform:"uppercase",marginBottom:6}}>Manufacturing Process Sheet ({result.ops.length} operations, {result.totalCycleMin?.toFixed(1)} min total)</div>
+        <div style={{maxHeight:280,overflow:"auto"}}><table className="rv-table"><thead><tr><th style={{width:25}}>#</th><th style={{textAlign:"left"}}>Operation</th><th style={{textAlign:"left"}}>Machine</th><th style={{textAlign:"right"}}>Time</th><th style={{textAlign:"right"}}>Rate</th><th style={{textAlign:"right"}}>Cost</th>{result.ops[0]?.category&&<th>Type</th>}</tr></thead>
+          <tbody>{result.ops.map((op,i)=>{const cost=(Number(op.cycleTimeMin)||0)*(Number(op.ratePerMin)||0);return(<tr key={i}><td style={{color:"var(--t3)"}}>{i+1}</td><td style={{fontWeight:600}}>{op.operation}{op.description&&<><br/><span style={{fontWeight:400,color:"var(--t3)",fontSize:9}}>{op.description}</span></>}</td><td style={{color:"var(--t2)"}}>{op.machine}</td><td style={{textAlign:"right",fontFamily:"'IBM Plex Mono'"}}>{op.cycleTimeMin}m</td><td style={{textAlign:"right",fontFamily:"'IBM Plex Mono'",color:"var(--t3)"}}>₹{op.ratePerMin}</td><td style={{textAlign:"right",fontFamily:"'IBM Plex Mono'",fontWeight:700}}>₹{cost.toFixed(2)}</td>{op.category&&<td style={{fontSize:8,textTransform:"uppercase",color:"var(--t3)"}}>{op.category}</td>}</tr>)})}</tbody>
+          <tfoot><tr><td/><td style={{fontWeight:700}}>TOTAL</td><td/><td style={{textAlign:"right",fontFamily:"'IBM Plex Mono'",fontWeight:700}}>{result.totalCycleMin?.toFixed(1)}m</td><td/><td style={{textAlign:"right",fontFamily:"'IBM Plex Mono'",fontWeight:700,color:"var(--ac)"}}>₹{(result.details?.proc||0).toFixed(2)}</td>{result.ops[0]?.category&&<td/>}</tr></tfoot></table></div>
+      </div>}
+      {/* Negotiation Leverage */}
+      {result.negotiationPoints?.length>0&&<div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:8,padding:12,marginTop:14}}>
+        <div style={{fontSize:9,textTransform:"uppercase",letterSpacing:.8,color:"var(--t3)",marginBottom:6}}>🎯 Negotiation Leverage</div>
+        {result.negotiationPoints.map((p,i)=><div key={i} style={{fontSize:11,color:"var(--t2)",padding:"3px 0",borderBottom:"1px solid var(--s2)",lineHeight:1.4}}>{p}</div>)}
+      </div>}
+      {/* Benchmark Range */}
+      <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:8,padding:12,marginTop:14}}>
+        <div style={{fontSize:9,textTransform:"uppercase",letterSpacing:.8,color:"var(--t3)",marginBottom:6}}>📊 Benchmark Range (±8%)</div>
+        <div style={{position:"relative",height:20,background:"var(--s2)",borderRadius:4,overflow:"hidden"}}>
+          <div style={{position:"absolute",top:0,height:"100%",background:"rgba(37,99,235,.1)",borderLeft:"2px solid var(--ac)",borderRight:"2px solid var(--ac)",left:"15%",width:"70%"}}/>
+          <div style={{position:"absolute",top:-2,bottom:-2,width:3,background:"#10b981",borderRadius:2,left:"50%"}}/>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",marginTop:3,fontSize:9,color:"var(--t3)",fontFamily:"'IBM Plex Mono'"}}><span>₹{(t*0.92).toFixed(2)}</span><span style={{color:"#10b981"}}>₹{t.toFixed(2)}</span><span>₹{(t*1.08).toFixed(2)}</span></div>
+      </div>
+      {/* Smart Actions */}
+      {(()=>{const ctx=`Part: ${result.name}, Should-Cost: ₹${t.toFixed(2)}/piece, Weight: ${result.estimatedWeight}, ${result.operationCount} operations, ${result.totalCycleMin?.toFixed(1)} min cycle, RM: ${result.rmPct}%, OH: ${result.costParams?.ohPct}%, Profit: ${result.costParams?.profitPct}%, Rejection: ${result.costParams?.rejectionPct}%. Breakdown: RM ₹${result.details?.rm?.toFixed(2)}, Process ₹${result.details?.proc?.toFixed(2)}, OH ₹${result.details?.oh?.toFixed(2)}, Profit ₹${result.details?.profit?.toFixed(2)}.${result.negotiationPoints?.length?" Negotiation: "+result.negotiationPoints.join("; "):""}`;
+      return <SmartActionBlock context={ctx} actions={[
+        {icon:"📧",t:"Email Supplier — Price Negotiation",d:"Draft email citing should-cost data to negotiate price reduction",type:"email"},
+        {icon:"📋",t:"Should-Cost Brief for Management",d:"Executive summary with cost breakdown, benchmark, and recommendation",type:"brief"},
+        {icon:"📊",t:"Supplier Quote vs Should-Cost Comparison",d:"Side-by-side analysis highlighting overpriced elements",type:"compare"},
+        {icon:"💰",t:"Annual Savings Calculator",d:"Calculate savings if negotiated to should-cost across full annual volume",type:"calc"},
+        {icon:"📧",t:"RFQ Email to 3 Alternate Suppliers",d:"Competitive quote request with your part specs and target price",type:"email"},
+        {icon:"🔍",t:"Cost Reduction Ideas (VaVe)",d:"AI-suggested value engineering ideas to further reduce this part cost",type:"calc"},
+      ]}/>})()}
+      <div style={{textAlign:"center",color:"var(--t3)",fontSize:8,marginTop:14,borderTop:"1px solid var(--s2)",paddingTop:8}}>Zero-Based Should-Cost Analysis • OH {result.costParams?.ohPct||15}% • Profit {result.costParams?.profitPct||8}% • Rejection {result.costParams?.rejectionPct||2}% • Confidential — {result.date}</div>
+      <div className="mod-actions"><button className="btn-sec" onClick={onBack}>← New Analysis</button><button className="btn-pri" onClick={()=>plan==="free"?alert("PDF export requires Professional plan"):window.print()}>{plan==="free"?"🔒 PDF (Pro)":"📄 Print/PDF"}</button></div>
+    </div>);
+  }
+  // Tool-cost executive view
+  if(isTC){
+    const d=result.details||{};const bd=result.costBreakdownTC;
+    const TC_COLORS=["#3b82f6","#06b6d4","#14b8a6","#f59e0b","#8b5cf6","#ec4899","#0891b2","#64748b","#059669","#dc2626"];
+    return(<div className="result-view">
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14,flexWrap:"wrap",gap:10}}>
+        <div><div style={{fontSize:17,fontWeight:700}}>{result.name}</div><div style={{fontSize:10,color:"var(--t3)"}}>{mod?.name} • {result.date}</div></div>
+        <div style={{display:"flex",gap:10}}>
+          <div style={{background:"linear-gradient(135deg,rgba(139,92,246,.12),rgba(139,92,246,.04))",border:"1px solid rgba(139,92,246,.3)",borderRadius:9,padding:"10px 18px",textAlign:"center"}}>
+            <div style={{fontSize:9,textTransform:"uppercase",letterSpacing:1.5,color:"var(--t3)"}}>Tool Cost</div>
+            <div style={{fontFamily:"'IBM Plex Mono'",fontSize:22,fontWeight:700,color:"#8b5cf6"}}>₹{t.toFixed(0)}</div>
+          </div>
+          <div style={{background:"linear-gradient(135deg,rgba(16,185,129,.12),rgba(16,185,129,.04))",border:"1px solid rgba(16,185,129,.3)",borderRadius:9,padding:"10px 18px",textAlign:"center"}}>
+            <div style={{fontSize:9,textTransform:"uppercase",letterSpacing:1.5,color:"var(--t3)"}}>Amortized/Piece</div>
+            <div style={{fontFamily:"'IBM Plex Mono'",fontSize:22,fontWeight:700,color:"#10b981"}}>₹{(d.amortizedPerPiece||0).toFixed(2)}</div>
+            <div style={{fontSize:9,color:"var(--t3)"}}>{Number(result.tl||0).toLocaleString()} shots</div>
+          </div>
+        </div>
+      </div>
+      {/* Full Cost Breakdown Table */}
+      {bd?<table className="rv-table"><thead><tr><th style={{textAlign:"left"}}>Element</th><th style={{textAlign:"right"}}>₹</th><th style={{textAlign:"right"}}>%</th></tr></thead>
+        <tbody>{Object.entries(bd).map(([key,item],i)=>{if(item.amount===0&&!["material","machining","boughtOut","profit"].includes(key))return null;return(<tr key={key}><td><span style={{display:"inline-block",width:7,height:7,borderRadius:"50%",background:TC_COLORS[i%TC_COLORS.length],marginRight:6,verticalAlign:"middle"}}/>{item.label}</td><td style={{textAlign:"right",fontFamily:"'IBM Plex Mono'",fontWeight:600}}>₹{item.amount.toFixed(0)}</td><td style={{textAlign:"right",color:"var(--t3)",fontSize:10}}>{t>0?((item.amount/t)*100).toFixed(1):"0"}%</td></tr>)})}
+        </tbody><tfoot><tr style={{borderTop:"2px solid #8b5cf6"}}><td style={{fontWeight:700}}>TOTAL</td><td style={{textAlign:"right",fontFamily:"'IBM Plex Mono'",fontWeight:700,color:"#8b5cf6"}}>₹{t.toFixed(0)}</td><td style={{textAlign:"right",fontWeight:600}}>100%</td></tr></tfoot></table>
+      :<table className="rv-table"><thead><tr><th style={{textAlign:"left"}}>Element</th><th style={{textAlign:"right"}}>₹</th><th style={{textAlign:"right"}}>%</th></tr></thead>
+        <tbody>{[{l:"🪨 Tool Steel",v:d.material||0},{l:"🔧 Machining",v:d.machining||0},{l:"🛒 Bought-out",v:d.boughtOut||0}].map((r,i)=><tr key={i}><td>{r.l}</td><td style={{textAlign:"right",fontFamily:"'IBM Plex Mono'",fontWeight:600}}>₹{r.v.toFixed(0)}</td><td style={{textAlign:"right",color:"var(--t3)"}}>{t>0?((r.v/t)*100).toFixed(1):"0"}%</td></tr>)}
+        </tbody><tfoot><tr><td style={{fontWeight:700}}>TOTAL</td><td style={{textAlign:"right",fontFamily:"'IBM Plex Mono'",fontWeight:700,color:"#8b5cf6"}}>₹{t.toFixed(0)}</td><td/></tr></tfoot></table>}
+      {result.ops?.length>0&&<div style={{marginTop:12}}><div style={{fontSize:10,fontWeight:600,color:"var(--t3)",textTransform:"uppercase",marginBottom:6}}>Operations ({result.ops.length} items, {result.ops.reduce((s,o)=>s+(Number(o.hoursEstimate)||0),0)} hrs total)</div>
+        <table className="rv-table"><thead><tr><th style={{textAlign:"left"}}>Operation</th><th style={{textAlign:"right"}}>Hours</th><th style={{textAlign:"right"}}>₹/hr</th><th style={{textAlign:"right"}}>Cost</th></tr></thead>
+        <tbody>{result.ops.map((o,i)=>{const c=(Number(o.hoursEstimate)||0)*(Number(o.ratePerHour)||0);return(<tr key={i}><td style={{fontWeight:500}}>{o.operation}</td><td style={{textAlign:"right",fontFamily:"'IBM Plex Mono'"}}>{o.hoursEstimate}</td><td style={{textAlign:"right",fontFamily:"'IBM Plex Mono'",color:"var(--t3)"}}>₹{o.ratePerHour}</td><td style={{textAlign:"right",fontFamily:"'IBM Plex Mono'",fontWeight:700}}>₹{c.toFixed(0)}</td></tr>)})}</tbody></table></div>}
+      {/* Smart Actions */}
+      {(()=>{const ctx=`Tool: ${result.name}, Total Cost: ₹${t.toLocaleString()}, Amortized: ₹${(d.amortizedPerPiece||0).toFixed(2)}/piece, Tool Life: ${d.toolLife?.toLocaleString()} shots. Material: ₹${d.material?.toLocaleString()}, Machining: ₹${d.machining?.toLocaleString()}, Bought-out: ₹${d.boughtOut?.toLocaleString()}, OH: ${result.costParams?.ohPct}%, Trial: ${result.costParams?.trialPct}%, Profit: ${result.costParams?.profitPct}%. ${result.ops?.length} operations, ${result.ops?.reduce((s,o)=>s+(Number(o.hoursEstimate)||0),0)} total hours.`;
+      return <SmartActionBlock context={ctx} actions={[
+        {icon:"📧",t:"RFQ Email to 3 Tool Makers",d:"Competitive quote request with your tool specs and target price",type:"email"},
+        {icon:"📋",t:"Tool Cost Brief for Management",d:"Executive summary with cost breakdown, amortization, and recommendation",type:"brief"},
+        {icon:"📊",t:"Supplier Quote vs Should-Cost",d:"Compare tool maker's quotation against your zero-based estimate",type:"compare"},
+        {icon:"💰",t:"Tool Amortization Scenarios",d:"Calculate amortized cost at different production volumes and tool life",type:"calc"},
+        {icon:"📧",t:"PO Terms Email to Tool Maker",d:"Payment milestone terms, trial acceptance criteria, warranty clauses",type:"email"},
+        {icon:"🔍",t:"Tool Design Optimization Ideas",d:"AI-suggested design changes to reduce machining hours or material",type:"calc"},
+      ]}/>})()}
+      <div style={{textAlign:"center",color:"var(--t3)",fontSize:8,marginTop:14,borderTop:"1px solid var(--s2)",paddingTop:8}}>Tool/Die/Mould Cost Analysis • OH {result.costParams?.ohPct||12}% • Trial {result.costParams?.trialPct||10}% • Profit {result.costParams?.profitPct||10}% • Confidential — {result.date}</div>
+      <div className="mod-actions"><button className="btn-sec" onClick={onBack}>← New Analysis</button><button className="btn-pri" onClick={()=>plan==="free"?alert("PDF export requires Professional plan"):window.print()}>{plan==="free"?"🔒 PDF (Pro)":"📄 Print/PDF"}</button></div>
+    </div>);
+  }
+  // Transport executive view
+  if(result.module==="transport"&&result.costBreakdown){
+    const rt=result.route||{};const bd=result.costBreakdown||[];const tips=result.costReductionTips||[];
+    const fuelCost=bd.find(c=>c.cat==="fuel")?.amount||0;
+    const fuelPct=result.total>0?((fuelCost/result.total)*100).toFixed(0):0;
+    return(<div className="result-view">
+      {/* Header */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14,flexWrap:"wrap",gap:10}}>
+        <div><div style={{fontSize:17,fontWeight:700,fontFamily:"'Bricolage Grotesque',sans-serif"}}>🚛 {rt.origin||"Origin"} → {rt.dest||"Destination"}</div>
+          <div style={{fontSize:11,color:"var(--t2)",marginTop:2}}>{rt.truck} • {rt.distKm?.toLocaleString()} km • {rt.transitDays||Math.ceil((rt.distKm||0)/400)} day(s) transit • {rt.rateType==="contract"?rt.contractMonths+"mo Contract":"Spot Rate"}</div>
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          <div style={{background:"linear-gradient(135deg,rgba(245,158,11,.12),rgba(245,158,11,.04))",border:"1px solid rgba(245,158,11,.3)",borderRadius:9,padding:"10px 16px",textAlign:"center"}}>
+            <div style={{fontSize:9,textTransform:"uppercase",letterSpacing:1,color:"var(--t3)"}}>Trip Cost</div>
+            <div style={{fontFamily:"'IBM Plex Mono'",fontSize:20,fontWeight:700,color:"#f59e0b"}}>₹{result.total?.toLocaleString()}</div>
+          </div>
+          <div style={{background:"linear-gradient(135deg,rgba(37,99,235,.12),rgba(37,99,235,.04))",border:"1px solid rgba(37,99,235,.3)",borderRadius:9,padding:"10px 16px",textAlign:"center"}}>
+            <div style={{fontSize:9,textTransform:"uppercase",letterSpacing:1,color:"var(--t3)"}}>Per Piece</div>
+            <div style={{fontFamily:"'IBM Plex Mono'",fontSize:20,fontWeight:700,color:"var(--ac)"}}>₹{result.perPiece?.toFixed(2)}</div>
+          </div>
+          <div style={{background:"linear-gradient(135deg,rgba(16,185,129,.12),rgba(16,185,129,.04))",border:"1px solid rgba(16,185,129,.3)",borderRadius:9,padding:"10px 16px",textAlign:"center"}}>
+            <div style={{fontSize:9,textTransform:"uppercase",letterSpacing:1,color:"var(--t3)"}}>Per Kg</div>
+            <div style={{fontFamily:"'IBM Plex Mono'",fontSize:20,fontWeight:700,color:"#10b981"}}>₹{result.perKg?.toFixed(2)}</div>
+          </div>
+        </div>
+      </div>
+      {/* Route Summary Badges */}
+      <div style={{display:"flex",gap:4,marginBottom:14,flexWrap:"wrap"}}>
+        <span className="rv-badge">📍 {rt.distKm?.toLocaleString()} km</span>
+        <span className="rv-badge">🚛 {rt.truck}</span>
+        <span className="rv-badge">⚖️ {rt.totalWt?.toLocaleString()} kg</span>
+        <span className="rv-badge">📦 {rt.pcsLoad?.toLocaleString()} pcs</span>
+        <span className="rv-badge">⛽ Diesel {fuelPct}% of cost</span>
+        {rt.rateType==="contract"&&<span className="rv-badge rv-badge-ok">📝 Contract Rate</span>}
+        {rt.totalWt>0&&TRUCK_DB[rt.truck]&&<span className={`rv-badge ${rt.totalWt/(TRUCK_DB[rt.truck]?.payload||1)>0.6?"rv-badge-ok":"rv-badge-warn"}`}>📊 {((rt.totalWt/(TRUCK_DB[rt.truck]?.payload||1))*100).toFixed(0)}% load utilization</span>}
+      </div>
+      {/* Cost Breakdown Table */}
+      <table className="rv-table"><thead><tr><th style={{textAlign:"left"}}>Cost Item</th><th style={{textAlign:"left"}}>Calculation Basis</th><th style={{textAlign:"right"}}>₹</th><th style={{textAlign:"right"}}>%</th></tr></thead>
+        <tbody>{bd.map((c,i)=>{const pct=result.total>0?((Math.abs(c.amount)/result.total)*100).toFixed(1):"0";
+          const colors={fuel:"#f59e0b",toll:"#6366f1",driver:"#3b82f6",loading:"#0891b2",insurance:"#10b981",overhead:"#64748b",discount:"#10b981",other:"#94a3b8"};
+          return(<tr key={i} style={{background:c.amount<0?"rgba(16,185,129,.04)":"transparent"}}>
+            <td><span style={{display:"inline-block",width:7,height:7,borderRadius:"50%",background:colors[c.cat]||"#94a3b8",marginRight:6}}/>{c.item}</td>
+            <td style={{fontSize:10,color:"var(--t2)"}}>{c.desc||"—"}</td>
+            <td style={{textAlign:"right",fontFamily:"'IBM Plex Mono'",fontWeight:600,color:c.amount<0?"var(--ok)":"var(--t1)"}}>{c.amount<0?"−":""}₹{Math.abs(c.amount).toLocaleString()}</td>
+            <td style={{textAlign:"right",color:"var(--t3)",fontSize:10}}>{pct}%</td>
+          </tr>)})}</tbody>
+        <tfoot><tr style={{borderTop:"2px solid var(--ac)"}}><td style={{fontWeight:700}}>TOTAL TRIP COST</td><td/><td style={{textAlign:"right",fontFamily:"'IBM Plex Mono'",fontWeight:700,color:"var(--ac)"}}>₹{result.total?.toLocaleString()}</td><td style={{textAlign:"right",fontWeight:600}}>100%</td></tr></tfoot>
+      </table>
+      {/* Per Unit Summary */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:1,background:"var(--s2)",border:"1px solid var(--s2)",borderRadius:8,overflow:"hidden",marginTop:14,marginBottom:14}}>
+        {[["Trip Cost","₹"+result.total?.toLocaleString(),""],["₹/kg ("+rt.totalWt?.toLocaleString()+" kg)","₹"+result.perKg?.toFixed(2),""],["₹/Piece ("+rt.pcsLoad?.toLocaleString()+" pcs)","₹"+result.perPiece?.toFixed(2),"var(--ac)"]].map(([l,v,c],i)=>
+          <div key={i} style={{background:"var(--s1)",padding:"10px 14px",textAlign:"center"}}>
+            <div style={{fontSize:9,color:"var(--t3)",textTransform:"uppercase"}}>{l}</div>
+            <div style={{fontFamily:"'IBM Plex Mono'",fontSize:16,fontWeight:700,color:c||"var(--t1)",marginTop:2}}>{v}</div>
+          </div>)}
+      </div>
+      {/* Cost Reduction Tips */}
+      {tips.length>0&&<div style={{background:"rgba(16,185,129,.04)",border:"1px solid rgba(16,185,129,.15)",borderRadius:10,padding:14,marginBottom:14}}>
+        <div style={{fontSize:12,fontWeight:700,color:"var(--ok)",marginBottom:8}}>💡 Cost Reduction Strategies for This Route</div>
+        {tips.map((tip,i)=><div key={i} style={{fontSize:11,color:"var(--t2)",padding:"5px 0",borderBottom:i<tips.length-1?"1px solid var(--s2)":"none",lineHeight:1.5}}>{tip}</div>)}
+      </div>}
+      {/* Smart Actions */}
+      {(()=>{const ctx=`Route: ${rt.origin} to ${rt.dest}, ${rt.distKm}km, ${rt.truck}, ${rt.totalWt}kg, ${rt.pcsLoad} pcs, Trip cost ₹${result.total?.toLocaleString()}, ₹${result.perPiece?.toFixed(2)}/piece, ₹${result.perKg?.toFixed(2)}/kg, ${rt.rateType} rate. Breakdown: ${bd.map(c=>c.item+": ₹"+c.amount).join(", ")}`;
+      return <SmartActionBlock context={ctx} actions={[
+        {icon:"📧",t:"RFQ Email to 3 Transporters",d:"Competitive freight quote request with route specs, weight, frequency",type:"email"},
+        {icon:"📋",t:"Logistics Cost Brief for Management",d:"One-page summary: route, cost breakdown, per-piece rate, savings potential",type:"brief"},
+        {icon:"📊",t:"Spot vs Contract Comparison",d:"12-month cost comparison: spot rate vs contract with volume commitment",type:"compare"},
+        {icon:"🚂",t:"Rail vs Road Comparison",d:"CONCOR container rate vs road freight for this route and weight",type:"compare"},
+        {icon:"🔄",t:"Milk Run Route Optimizer",d:"Multi-pickup route design to consolidate shipments and reduce per-piece cost",type:"calc"},
+        {icon:"📦",t:"Load Optimization Calculator",d:"Maximize pieces per truck: packaging resize, stacking, weight utilization",type:"calc"},
+      ]}/>})()}
+      {/* Benchmark Range */}
+      <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:8,padding:12}}>
+        <div style={{fontSize:9,textTransform:"uppercase",letterSpacing:.8,color:"var(--t3)",marginBottom:6}}>📊 Market Rate Benchmark (₹/kg for {rt.distKm?.toLocaleString()} km)</div>
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:"var(--t2)"}}>
+          <span>Low: <b style={{fontFamily:"IBM Plex Mono"}}>₹{(result.perKg*0.8).toFixed(2)}</b></span>
+          <span style={{color:"var(--ac)"}}>Your rate: <b style={{fontFamily:"IBM Plex Mono"}}>₹{result.perKg?.toFixed(2)}</b></span>
+          <span>High: <b style={{fontFamily:"IBM Plex Mono"}}>₹{(result.perKg*1.25).toFixed(2)}</b></span>
+        </div>
+        <div style={{position:"relative",height:8,background:"var(--s2)",borderRadius:4,marginTop:6,overflow:"hidden"}}>
+          <div style={{position:"absolute",top:0,height:"100%",background:"rgba(37,99,235,.1)",left:"20%",width:"60%"}}/>
+          <div style={{position:"absolute",top:-1,bottom:-1,width:3,background:"var(--ac)",borderRadius:2,left:"50%"}}/>
+        </div>
+        <div style={{fontSize:8,color:"var(--t3)",marginTop:4}}>Based on Indian road transport benchmarks for {rt.truck} on {rt.distKm?.toLocaleString()}km route</div>
+      </div>
+      <div style={{textAlign:"center",color:"var(--t3)",fontSize:8,marginTop:14,borderTop:"1px solid var(--s2)",paddingTop:8}}>Transportation Cost Analysis • {rt.origin} → {rt.dest} • {rt.distKm?.toLocaleString()} km • {rt.truck} • {rt.rateType} • {result.date}</div>
+      <div className="mod-actions"><button className="btn-sec" onClick={onBack}>← New Analysis</button><button className="btn-pri" onClick={()=>plan==="free"?alert("PDF export requires Professional plan"):window.print()}>{plan==="free"?"🔒 PDF (Pro)":"📄 Print/PDF"}</button></div>
+    </div>);
+  }
+  // Generic module executive view
+  return(<div className="result-view">
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14,flexWrap:"wrap",gap:10}}>
+      <div><div style={{fontSize:17,fontWeight:700}}>{result.name}</div><div style={{fontSize:10,color:"var(--t3)"}}>{mod?.name} • {result.date}</div></div>
+      <div style={{background:"linear-gradient(135deg,rgba(37,99,235,.12),rgba(37,99,235,.04))",border:"1px solid rgba(37,99,235,.3)",borderRadius:9,padding:"10px 18px",textAlign:"center"}}>
+        <div style={{fontSize:9,textTransform:"uppercase",letterSpacing:1.5,color:"var(--t3)"}}>{cfg?.resultLabel||"Total"}</div>
+        <div style={{fontFamily:"'IBM Plex Mono'",fontSize:20,fontWeight:700,color:"var(--ac)"}}>{result.resultVal}</div>
+      </div>
+    </div>
+    {result.details?.recommendation&&<div style={{background:result.details.recommendation==="MAKE"?"rgba(16,185,129,.08)":"rgba(245,158,11,.08)",border:"1px solid "+(result.details.recommendation==="MAKE"?"rgba(16,185,129,.3)":"rgba(245,158,11,.3)"),borderRadius:8,padding:10,fontSize:13,fontWeight:600,color:result.details.recommendation==="MAKE"?"#10b981":"#f59e0b",marginBottom:12,textAlign:"center"}}>{result.details.recommendation} | Payback: {result.details.payback<99?result.details.payback.toFixed(1)+"yr":"N/A"}</div>}
+    {result.details?.suppliers&&<div style={{marginBottom:12}}><div style={{fontSize:10,fontWeight:600,color:"var(--t3)",textTransform:"uppercase",marginBottom:6}}>Supplier TCO Comparison</div>{result.details.suppliers.map((s,i)=><div key={i} style={{display:"flex",justifyContent:"space-between",padding:"6px 10px",background:s.name===result.details.bestSupplier?"rgba(16,185,129,.06)":"var(--s1)",border:"1px solid "+(s.name===result.details.bestSupplier?"rgba(16,185,129,.3)":"var(--s2)"),borderRadius:6,marginBottom:3,fontSize:11}}><span style={{fontWeight:s.name===result.details.bestSupplier?700:400}}>{s.name} {s.name===result.details.bestSupplier&&"✅"}</span><span style={{fontFamily:"'IBM Plex Mono'",fontWeight:600}}>Unit ₹{s.unitPrice.toFixed(0)} → TCO ₹{s.tco.toFixed(2)}</span></div>)}</div>}
+    {result.ops?.length>0&&<div style={{marginBottom:12}}><div style={{fontSize:10,fontWeight:600,color:"var(--t3)",textTransform:"uppercase",marginBottom:6}}>{cfg?.sectionTitle||"Line Items"} ({result.ops.length} items)</div>
+      <table className="rv-table"><thead><tr>{(cfg?.cols||[]).filter(c=>!c.hidden).map(c=><th key={c.key} style={{textAlign:c.type==="number"||c.computed?"right":"left"}}>{c.label}</th>)}</tr></thead>
+      <tbody>{result.ops.slice(0,30).map((o,i)=><tr key={i}>{(cfg?.cols||[]).filter(c=>!c.hidden).map(c=>{if(c.computed){const v=c.computed(o);return <td key={c.key} style={{textAlign:"right",fontFamily:"'IBM Plex Mono'",fontWeight:600}}>{typeof v==="number"?"₹"+Math.abs(v).toFixed(2):v}</td>}return <td key={c.key} style={{textAlign:c.type==="number"?"right":"left",fontFamily:c.type==="number"?"'IBM Plex Mono'":"inherit"}}>{o[c.key]!=null?o[c.key]:"—"}</td>})}</tr>)}</tbody></table>
+    </div>}
+    {/* Smart Actions for all modules */}
+    {(()=>{const modName=mod?.name||result.module;const ctx=`Module: ${modName}, Result: ${result.name}, Total: ${result.resultVal}, Date: ${result.date}. ${result.details?JSON.stringify(result.details).slice(0,500):""}`;
+      const modActions={
+        "packaging":[
+          {icon:"📧",t:"Email Packaging Supplier — Price Negotiation",d:"Draft email with your ZBC data to negotiate packaging rates",type:"email"},
+          {icon:"📋",t:"Packaging Cost Brief for Management",d:"Summary: primary, secondary, tertiary breakdown with optimization suggestions",type:"brief"},
+          {icon:"📊",t:"Returnable vs Disposable Comparison",d:"12-month cost comparison of returnable crates vs corrugated boxes",type:"compare"},
+          {icon:"💰",t:"Packaging Optimization Calculator",d:"Reduce box size, change ply, optimize pallet loading — savings impact",type:"calc"},
+        ],
+        "_default":[
+          {icon:"📧",t:"Email Supplier with Analysis",d:"Professional email with your analysis data and negotiation points",type:"email"},
+          {icon:"📋",t:"Executive Brief for Management",d:"One-page summary with findings, data, and recommendation",type:"brief"},
+          {icon:"💰",t:"Savings Calculator",d:"Calculate annual savings based on this analysis",type:"calc"},
+          {icon:"📊",t:"Benchmark Comparison",d:"Compare your numbers against industry benchmarks",type:"compare"},
+        ]
+      };
+      return <SmartActionBlock context={ctx} actions={modActions[result.module]||modActions._default}/>})()}
+    <div className="mod-actions"><button className="btn-sec" onClick={onBack}>← New Analysis</button><button className="btn-pri" onClick={()=>plan==="free"?alert("PDF export requires Professional plan"):window.print()}>{plan==="free"?"🔒 PDF (Pro)":"📄 Print/PDF"}</button></div></div>);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// DATA MAPPER — Parse, Preview, Map Columns
+// ═══════════════════════════════════════════════════════════════
+const SPEND_FIELDS=[
+  {key:"supplier",label:"Supplier Name",required:true,hint:"Vendor / Party name"},
+  {key:"amount",label:"Total Value (₹)",required:true,hint:"PO value / line amount"},
+  {key:"description",label:"Material / Item",required:true,hint:"Item description or name"},
+  {key:"poNumber",label:"PO Number",required:false,hint:"Purchase order number"},
+  {key:"poDate",label:"PO / GRN Date",required:false,hint:"Date column"},
+  {key:"quantity",label:"Quantity",required:false,hint:"Order qty"},
+  {key:"unitPrice",label:"Unit Price",required:false,hint:"Rate per unit"},
+  {key:"category",label:"Material Group",required:false,hint:"Category / group code"},
+  {key:"plant",label:"Plant / Location",required:false,hint:"Factory / warehouse"},
+];
+const RPT_MAP_FIELDS={
+  "spend":SPEND_FIELDS,
+  "price-variance":[
+    {key:"material",label:"Material / Item Code",required:true,hint:"Material code or description"},
+    {key:"description",label:"Material Description",required:true,hint:"Item name / description"},
+    {key:"supplier",label:"Supplier Name",required:true,hint:"Vendor / Party"},
+    {key:"unitPrice",label:"Unit Price (₹)",required:true,hint:"Rate per unit"},
+    {key:"date",label:"PO / GRN Date",required:false,hint:"Transaction date"},
+    {key:"quantity",label:"Quantity",required:false,hint:"Order qty"},
+    {key:"amount",label:"Total Value",required:false,hint:"Line amount"},
+    {key:"plant",label:"Plant / Location",required:false,hint:"Factory"},
+    {key:"uom",label:"UOM",required:false,hint:"Unit of measure"},
+  ],
+  "inventory-health":[
+    {key:"material",label:"Material Code",required:true,hint:"Item code / SKU"},
+    {key:"description",label:"Description",required:true,hint:"Item name"},
+    {key:"stockQty",label:"Current Stock Qty",required:true,hint:"On-hand quantity"},
+    {key:"stockValue",label:"Stock Value (₹)",required:true,hint:"Current value"},
+    {key:"lastReceipt",label:"Last Receipt Date",required:false,hint:"Last GRN date"},
+    {key:"lastIssue",label:"Last Issue Date",required:false,hint:"Last consumption date"},
+    {key:"category",label:"Material Group",required:false,hint:"Category / ABC class"},
+    {key:"plant",label:"Plant / Warehouse",required:false,hint:"Storage location"},
+    {key:"avgConsumption",label:"Avg Monthly Consumption",required:false,hint:"Monthly usage"},
+  ],
+  "supplier-scorecard":[
+    {key:"supplier",label:"Supplier Name",required:true,hint:"Vendor name"},
+    {key:"material",label:"Material / Item",required:false,hint:"Item supplied"},
+    {key:"qtyInspected",label:"Qty Inspected",required:false,hint:"Inspection quantity"},
+    {key:"qtyRejected",label:"Qty Rejected",required:false,hint:"Rejection quantity"},
+    {key:"promisedDate",label:"Promised Delivery Date",required:false,hint:"Expected date"},
+    {key:"actualDate",label:"Actual Delivery Date",required:false,hint:"GRN date"},
+    {key:"amount",label:"PO Value (₹)",required:false,hint:"Order value"},
+    {key:"rejectionReason",label:"Rejection Reason",required:false,hint:"Defect type"},
+  ],
+};
+
+function DataMapper({files,fields,onMapped,onBack}){
+  const[parsing,setParsing]=useState(true);
+  const[parseErr,setParseErr]=useState("");
+  const[sheets,setSheets]=useState([]);
+  const[activeSheet,setActiveSheet]=useState(0);
+  const[headers,setHeaders]=useState([]);
+  const[rows,setRows]=useState([]);
+  const[totalRows,setTotalRows]=useState(0);
+  const[mapping,setMapping]=useState({});
+  const[autoDetected,setAutoDetected]=useState(false);
+
+  useEffect(()=>{
+    if(!files.length)return;
+    (async()=>{
+      setParsing(true);setParseErr("");
+      try{
+        const f=files[0];const ext=fext(f);
+        let allSheets=[];
+        if(ext==="csv"||ext==="tsv"){
+          const txt=await toText(f);
+          const lines=txt.split("\n").filter(l=>l.trim());
+          const sep=ext==="tsv"?"\t":",";
+          const hdr=lines[0].split(sep).map(h=>h.replace(/^"|"$/g,"").trim());
+          const dataRows=lines.slice(1).map(l=>l.split(sep).map(c=>c.replace(/^"|"$/g,"").trim()));
+          allSheets=[{name:"Sheet1",headers:hdr,rows:dataRows,totalRows:dataRows.length}];
+        }else{
+          const XLSX=await loadXLSX();
+          const buf=await toArrBuf(f);
+          const wb=XLSX.read(buf,{type:"array",cellDates:true});
+          for(const sn of wb.SheetNames){
+            const ws=wb.Sheets[sn];
+            const json=XLSX.utils.sheet_to_json(ws,{header:1,defval:""});
+            if(json.length<2)continue;
+            const hdr=json[0].map(h=>String(h||"").trim());
+            const dataRows=json.slice(1).filter(r=>r.some(c=>c!=="")).map(r=>r.map(c=>String(c||"").trim()));
+            allSheets.push({name:sn,headers:hdr,rows:dataRows,totalRows:dataRows.length});
+          }
+        }
+        if(!allSheets.length){setParseErr("No data found in file");setParsing(false);return}
+        setSheets(allSheets);
+        const best=allSheets.reduce((a,b)=>b.totalRows>a.totalRows?b:a,allSheets[0]);
+        const idx=allSheets.indexOf(best);
+        setActiveSheet(idx);setHeaders(best.headers);setRows(best.rows);setTotalRows(best.totalRows);
+        // Auto-detect columns
+        const auto={};const hdrLow=best.headers.map(h=>h.toLowerCase());
+        const patterns={supplier:/vendor|supplier|party|creditor/i,amount:/amount|value|total|net.?val|po.?val/i,description:/desc|material|item|product|part/i,poNumber:/po.?n|order.?n|document/i,poDate:/date|posting|doc.?date|po.?date|grn.?date/i,date:/date|posting|doc.?date/i,quantity:/qty|quantity|quant/i,unitPrice:/price|rate|unit.?p|per.?unit/i,category:/group|categ|class|type|mat.?gr/i,plant:/plant|location|warehouse|site|stor/i,material:/material|item|code|sku|part/i,stockQty:/stock.?qty|on.?hand|current.?qty|avail/i,stockValue:/stock.?val|invent.?val|book.?val/i,lastReceipt:/last.?rec|last.?grn|receipt.?date/i,lastIssue:/last.?iss|last.?cons|issue.?date/i,avgConsumption:/avg|consumption|monthly|usage/i,qtyInspected:/inspect|checked|received/i,qtyRejected:/reject|defect|failed/i,promisedDate:/promised|expected|due|sched/i,actualDate:/actual|grn|receipt|deliver/i,rejectionReason:/reason|defect|cause|remark/i,uom:/uom|unit.?of|measure/i};
+        for(const fld of fields){
+          const rx=patterns[fld.key];if(!rx)continue;
+          const i=hdrLow.findIndex(h=>rx.test(h));
+          if(i!==-1)auto[fld.key]=i;
+        }
+        setMapping(auto);
+        if(Object.keys(auto).length>0)setAutoDetected(true);
+      }catch(e){setParseErr("Could not parse file: "+e.message)}
+      setParsing(false);
+    })();
+  },[files]);
+
+  const switchSheet=(idx)=>{
+    setActiveSheet(idx);setHeaders(sheets[idx].headers);setRows(sheets[idx].rows);setTotalRows(sheets[idx].totalRows);
+    setMapping({});setAutoDetected(false);
+  };
+  const setMap=(field,colIdx)=>{const m={...mapping};if(colIdx===-1)delete m[field];else m[field]=colIdx;setMapping(m)};
+  const requiredMapped=fields.filter(f=>f.required).every(f=>mapping[f.key]!==undefined);
+  const buildCleanData=()=>{
+    const mapped=fields.filter(f=>mapping[f.key]!==undefined);
+    const headerRow=mapped.map(f=>f.label).join(",");
+    const dataRows=rows.map(r=>mapped.map(f=>{let v=r[mapping[f.key]]||"";if(v.includes(","))v='"'+v+'"';return v}).join(","));
+    return headerRow+"\n"+dataRows.join("\n");
+  };
+  const confirm=()=>{
+    const cleanCSV=buildCleanData();
+    const summary={totalRows,sheetName:sheets[activeSheet].name,mappedFields:fields.filter(f=>mapping[f.key]!==undefined).map(f=>f.label),fileName:files[0].name};
+    onMapped(cleanCSV,summary);
+  };
+
+  if(parsing)return(<div style={{padding:20,textAlign:"center"}}><div className="mod-loading">📊 Parsing your spreadsheet...</div></div>);
+  if(parseErr)return(<div style={{padding:20}}><div className="mod-err">{parseErr}</div><button className="btn-sec" onClick={onBack} style={{marginTop:10}}>← Back</button></div>);
+
+  return(<div style={{maxWidth:750}}>
+    <button className="mob-back" onClick={onBack}>← Back to Upload</button>
+    <div style={{background:"rgba(16,185,129,.06)",border:"1px solid rgba(16,185,129,.2)",borderRadius:10,padding:14,marginBottom:16}}>
+      <div style={{fontSize:14,fontWeight:700,marginBottom:6}}>✅ File Parsed Successfully</div>
+      <div style={{display:"flex",gap:16,flexWrap:"wrap",fontSize:12,color:"var(--t2)"}}>
+        <span>📄 {files[0].name}</span>
+        <span>📋 {totalRows.toLocaleString()} rows</span>
+        <span>📊 {headers.length} columns</span>
+        <span>📑 {sheets.length} sheet{sheets.length>1?"s":""}</span>
+      </div>
+    </div>
+
+    {sheets.length>1&&<div style={{marginBottom:14}}>
+      <div style={{fontSize:11,fontWeight:600,color:"var(--t3)",marginBottom:6}}>SELECT SHEET</div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>{sheets.map((s,i)=><button key={i} onClick={()=>switchSheet(i)} style={{padding:"6px 14px",borderRadius:6,border:"1px solid "+(i===activeSheet?"var(--ac)":"var(--s2)"),background:i===activeSheet?"rgba(37,99,235,.08)":"var(--s1)",color:i===activeSheet?"var(--ac)":"var(--t2)",fontSize:11,cursor:"pointer",fontWeight:i===activeSheet?700:400}}>{s.name} ({s.totalRows.toLocaleString()} rows)</button>)}</div>
+    </div>}
+
+    <div style={{marginBottom:16}}>
+      <div style={{fontSize:13,fontWeight:700,marginBottom:4}}>📋 Data Preview (first 5 rows)</div>
+      <div style={{overflowX:"auto",border:"1px solid var(--s2)",borderRadius:8}}>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:10,fontFamily:"'IBM Plex Mono',monospace"}}>
+          <thead><tr>{headers.map((h,i)=><th key={i} style={{padding:"6px 8px",background:"var(--s1)",borderBottom:"1px solid var(--s2)",textAlign:"left",whiteSpace:"nowrap",fontWeight:700,color:"var(--t1)",fontSize:10}}>{h||`Col ${i+1}`}</th>)}</tr></thead>
+          <tbody>{rows.slice(0,5).map((r,ri)=><tr key={ri}>{headers.map((h,ci)=><td key={ci} style={{padding:"4px 8px",borderBottom:"1px solid var(--s2)",whiteSpace:"nowrap",maxWidth:180,overflow:"hidden",textOverflow:"ellipsis",color:"var(--t2)"}}>{r[ci]||"—"}</td>)}</tr>)}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <div style={{marginBottom:16}}>
+      <div style={{fontSize:13,fontWeight:700,marginBottom:4}}>🔗 Map Your Columns</div>
+      {autoDetected&&<div style={{fontSize:10,color:"var(--ok)",marginBottom:8}}>✨ Auto-detected {Object.keys(mapping).length} columns — verify and adjust if needed</div>}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+        {fields.map(f=><div key={f.key} style={{background:"var(--s1)",border:"1px solid "+(f.required&&mapping[f.key]===undefined?"rgba(239,68,68,.3)":"var(--s2)"),borderRadius:8,padding:10}}>
+          <div style={{fontSize:11,fontWeight:600,marginBottom:2}}>{f.required&&<span style={{color:"var(--err)"}}>* </span>}{f.label}</div>
+          <div style={{fontSize:9,color:"var(--t3)",marginBottom:6}}>{f.hint}</div>
+          <select value={mapping[f.key]!==undefined?mapping[f.key]:-1} onChange={e=>setMap(f.key,Number(e.target.value))} style={{width:"100%",padding:"5px 8px",borderRadius:6,border:"1px solid var(--s3)",background:"var(--bg)",color:"var(--t1)",fontSize:11}}>
+            <option value={-1}>— Select column —</option>
+            {headers.map((h,i)=><option key={i} value={i}>{h||`Column ${i+1}`}</option>)}
+          </select>
+          {mapping[f.key]!==undefined&&<div style={{fontSize:9,color:"var(--ok)",marginTop:3}}>✓ Sample: {rows[0]?.[mapping[f.key]]||"(empty)"}</div>}
+        </div>)}
+      </div>
+    </div>
+
+    {!requiredMapped&&<div style={{background:"rgba(239,68,68,.06)",border:"1px solid rgba(239,68,68,.2)",borderRadius:8,padding:10,marginBottom:12,fontSize:11,color:"var(--err)"}}>⚠️ Map all required fields (marked with *) to continue</div>}
+
+    <button className="btn-pri" style={{width:"100%",padding:"12px",fontSize:14}} onClick={confirm} disabled={!requiredMapped}>✅ Confirm Mapping — Proceed to Analysis →</button>
+  </div>);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ANALYSIS REPORTS — AI Instant + Expert Review
+// ═══════════════════════════════════════════════════════════════
+function ReportRunner({report,credits,useCredit,user,onBack}){
+  const[files,setFiles]=useState([]);const[notes,setNotes]=useState("");
+  const[status,setStatus]=useState("upload");const[result,setResult]=useState(null);
+  const[loading,setLoading]=useState(false);const[err,setErr]=useState("");
+  const[expertSent,setExpertSent]=useState(false);
+  const[cleanData,setCleanData]=useState(null);const[dataSummary,setDataSummary]=useState(null);
+  const[anonymize,setAnonymize]=useState(false);
+
+  const mapFields=RPT_MAP_FIELDS[report.id]||null;
+
+  const anonymizeCSV=(csv)=>{
+    if(!csv)return csv;
+    const lines=csv.split("\n");if(lines.length<2)return csv;
+    const hdr=lines[0].split(",");
+    const supIdx=hdr.findIndex(h=>/supplier|vendor|party/i.test(h));
+    if(supIdx===-1)return csv;
+    const map=new Map();let counter=1;
+    const anon=lines.map((line,i)=>{
+      if(i===0)return line;
+      const cols=line.split(",");
+      const raw=cols[supIdx]?.replace(/^"|"$/g,"").trim()||"";
+      if(raw&&!map.has(raw))map.set(raw,"Supplier_"+String(counter++).padStart(3,"0"));
+      if(raw)cols[supIdx]=map.get(raw);
+      return cols.join(",");
+    });
+    return anon.join("\n");
+  };
+
+  const handleMapped=(csv,summary)=>{
+    const finalCSV=anonymize?anonymizeCSV(csv):csv;
+    setCleanData(finalCSV);setDataSummary({...summary,anonymized:anonymize});setStatus("mapped");
+  };
+
+  const runAI=async()=>{
+    if(!cleanData&&files.length===0){setErr("Please upload your data file");return}
+    if(credits<report.credits){setErr(`Need ${report.credits} AI credits (you have ${credits}).`);return}
+    setLoading(true);setErr("");
+    try{
+      for(let i=0;i<report.credits;i++)useCredit();
+      let fileContent=[];
+      if(cleanData){
+        const preview=cleanData.length>80000?cleanData.slice(0,80000)+"\n...[truncated]":cleanData;
+        fileContent=[{type:"text",text:"[STRUCTURED DATA — columns already mapped and validated by user]\n"+preview}];
+      }else{
+        for(const f of files){
+          const ext=fext(f);
+          if(["xlsx","xls","csv","tsv"].includes(ext)){
+            try{let data=await parseSpreadsheet(f);if(anonymize)data=anonymizeCSV(data);const preview=data.length>80000?data.slice(0,80000)+"\n...[truncated]":data;fileContent.push({type:"text",text:`[DATA FROM FILE: ${f.name}]\n${preview}`})}
+            catch(pe){fileContent.push({type:"text",text:`[File: ${f.name} — parse error: ${pe.message}]`})}
+          }else{const b=await toB64(f),mt=mtype(f);fileContent.push(mt.startsWith("image/")?{type:"image",source:{type:"base64",media_type:mt,data:b}}:{type:"document",source:{type:"base64",media_type:mt,data:b}})}
+        }
+      }
+      const prompt=`You are a senior procurement analytics consultant with 20+ years experience in Indian manufacturing procurement. You have deep expertise in spend analytics, supplier negotiations, category management, and cost optimization.
+
+Analyze the uploaded data thoroughly and produce a COMPREHENSIVE, BOARD-PRESENTATION READY ${report.name}.
+${dataSummary?`\nDATA CONTEXT: File "${dataSummary.fileName}", Sheet "${dataSummary.sheetName}", ${dataSummary.totalRows} rows. Mapped columns: ${dataSummary.mappedFields.join(", ")}. The data has been pre-processed and columns are clearly labeled.\n`:""}
+## YOUR ANALYSIS MUST BE:
+- Data-driven: every finding must reference specific numbers from the uploaded data
+- Actionable: every recommendation must be implementable within 6 months
+- Quantified: all impacts must be estimated in ₹ (Lakhs/Crores as appropriate)
+- Benchmarked: compare against Indian manufacturing industry standards
+- Prioritized: rank everything by business impact
+
+## GENERATE THESE SECTIONS:
+
+### 1. EXECUTIVE SUMMARY (5-7 key findings)
+Each finding must include a specific metric/number extracted from the data. These should be the most impactful insights that a CPO or CFO would want to see first.
+
+### 2. KEY METRICS (10-15 metrics)
+Extract actual numbers from the data. Include trend direction. Group by: cost metrics, efficiency metrics, risk metrics, opportunity metrics.
+
+### 3. TOP FINDINGS (10-15 findings ranked by ₹ impact)
+Each must have: the finding, quantified business impact in ₹, and specific recommended action. Be specific — name actual items, suppliers, categories from the data.
+
+### 4. RISK AREAS (5-8 critical risks)
+Include: supply concentration risk, price escalation risk, quality risk, compliance risk, dependency risk. Rate severity as High/Medium/Low with specific mitigation.
+
+### 5. STRATEGIC RECOMMENDATIONS (6-10 recommendations)
+Each must include: what to do, timeline (30/60/90/180 days), expected ₹ impact, effort level. Be specific to the data — don't give generic advice.
+
+### 6. QUICK WINS (5-8 actions for next 30 days)
+Low-effort, high-impact actions that can start immediately. Include specific items/suppliers/categories.
+
+### 7. NEGOTIATION AMMUNITION (3-5 data-backed points)
+Specific leverage points extracted from the data that can be used in upcoming supplier negotiations.
+
+Additional context from user: ${notes}
+
+RESPOND ONLY VALID JSON — no markdown, no backticks:
+{"title":"","executiveSummary":["finding with ₹ metric"],"keyMetrics":[{"metric":"","value":"","trend":"up|down|stable","category":"cost|efficiency|risk|opportunity"}],"findings":[{"rank":1,"finding":"","impact":"₹X Lakhs","action":""}],"riskAreas":[{"risk":"","severity":"High|Medium|Low","recommendation":"","impact":""}],"recommendations":[{"recommendation":"","timeline":"30 days","expectedImpact":"₹X Lakhs","effort":"Low|Medium|High"}],"quickWins":[{"action":"","effort":"Low","impact":"₹X Lakhs","category":""}],"negotiationPoints":["data-backed leverage point"]}`;
+      fileContent.push({type:"text",text:prompt+"\nNotes: "+(notes||"None")});
+      let r=await apiFetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:API_HEADERS,body:JSON.stringify({model:"claude-opus-4-6",max_tokens:8192,temperature:0,messages:[{role:"user",content:fileContent}]})});
+      if(!r.ok)r=await apiFetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:API_HEADERS,body:JSON.stringify({model:"claude-sonnet-4-5-20250929",max_tokens:8192,temperature:0,messages:[{role:"user",content:fileContent}]})});
+      if(!r.ok){const errBody=await r.text().catch(()=>"");throw new Error("API "+r.status+(errBody?": "+errBody.slice(0,200):""))}
+      const d=await r.json(),txt=stripCites(d.content?.map(c=>c.text||"").join("")||"");
+      const res=repairJSON(txt);
+      setResult(res);setStatus("result");
+    }catch(e){setErr("AI analysis failed: "+e.message+". Try Expert Review for complex data.")}
+    setLoading(false);
+  };
+
+  const requestExpert=async()=>{
+    setExpertSent(true);
+    try{const requests=await dbGet("cl-expert-requests")||[];
+      requests.push({id:Date.now(),report:report.id,reportName:report.name,user:user.email,userName:user.name,notes,fileNames:files.length?files.map(f=>f.name):["(data from AI analysis)"],date:new Date().toISOString(),status:"pending",price:report.expertPrice,hasAIReport:!!result});
+      await dbSet("cl-expert-requests",requests);}catch{}
+  };
+
+  if(status==="upload")return(<div style={{maxWidth:700}}>
+    <button className="btn-sec" style={{marginBottom:12,fontSize:11}} onClick={onBack}>← All Reports</button>
+    <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}><span style={{fontSize:28}}>{report.icon}</span><div><div style={{fontSize:18,fontWeight:700}}>{report.name}</div><div style={{fontSize:12,color:"var(--t2)"}}>{report.desc}</div></div></div>
+    <HelpGuide help={report.help}/>
+    <div className="rpt-data-box"><div className="rpt-data-title">📋 Data Required</div>{report.dataNeeded.map((d,i)=><div key={i} className="rpt-data-item">→ {d}</div>)}</div>
+    <FileUpload files={files} onChange={setFiles}/>
+    <div className="anon-toggle" onClick={()=>setAnonymize(!anonymize)}>
+      <div className={`anon-sw ${anonymize?"on":"off"}`}/>
+      <div><div style={{fontSize:12,fontWeight:600,color:"var(--t1)"}}>🛡️ Anonymize supplier names before AI processing</div>
+      <div style={{fontSize:10,color:"var(--t3)",marginTop:2}}>{anonymize?"Supplier names will be replaced with Supplier_001, Supplier_002, etc. before sending to AI":"Enable to mask sensitive supplier identities — AI gets the same analytical quality without seeing real names"}</div></div>
+    </div>
+    <textarea className="mod-notes" value={notes} onChange={e=>setNotes(e.target.value)} placeholder="Additional context: specific categories to focus on, time period, exclusions..."/>
+    {err&&<div className="mod-err">{err}</div>}
+    {loading&&<div className="mod-loading">🤖 AI analyzing your data... This may take 30-60 seconds.</div>}
+    <div className="rpt-paths">
+      <div className="rpt-path rpt-path-ai">
+        <div className="rpt-path-badge">⚡ INSTANT</div>
+        <div style={{fontSize:14,fontWeight:700,marginBottom:4}}>AI Analysis</div>
+        <div style={{fontSize:11,color:"var(--t2)",marginBottom:8}}>AI-powered report in 2-5 min. Good for directional insights and quick health checks.</div>
+        <div style={{fontSize:11,color:"var(--t3)",marginBottom:8}}>{report.credits} AI credits</div>
+        <button className="btn-pri" onClick={()=>{if(files.length===0){setErr("Please upload your data file");return}if(mapFields){setStatus("mapping")}else{runAI()}}} disabled={loading||files.length===0}>{mapFields?"Map Columns & Analyze →":"Generate AI Report →"}</button>
+      </div>
+      <div className="rpt-path rpt-path-expert">
+        <div className="rpt-path-badge" style={{background:"var(--warn)"}}>👨‍💼 EXPERT</div>
+        <div style={{fontSize:14,fontWeight:700,marginBottom:4}}>Expert-Reviewed Report</div>
+        <div style={{fontSize:11,color:"var(--t2)",marginBottom:8}}>Procurement analyst reviews, adds context, delivers polished report. Board-presentation ready.</div>
+        <div style={{fontSize:11,marginBottom:2}}><span style={{fontFamily:"IBM Plex Mono",fontWeight:700,color:"var(--warn)"}}>{report.expertPrice}</span></div>
+        <div style={{fontSize:10,color:"var(--t3)",marginBottom:8}}>Delivered in {report.turnaround}</div>
+        {expertSent?<div style={{background:"rgba(16,185,129,.08)",border:"1px solid rgba(16,185,129,.3)",borderRadius:6,padding:8,fontSize:11,color:"var(--ok)"}}>✅ Request submitted! Our expert will reach out within {report.turnaround}. For queries, contact <strong>support@costlens.technology</strong></div>
+        :<button className="btn-sec" style={{borderColor:"var(--warn)",color:"var(--warn)"}} onClick={requestExpert} disabled={files.length===0}>Request Expert Review →</button>}
+      </div>
+    </div>
+    <div style={{marginTop:16,border:"1px dashed var(--s3)",borderRadius:10,overflow:"hidden",background:"var(--s1)"}}>
+      <div style={{padding:"10px 14px",fontSize:12,fontWeight:700,color:"var(--ac)",borderBottom:"1px solid var(--s2)",display:"flex",alignItems:"center",gap:8}}>📊 Sample Report Preview — What You'll Get</div>
+      {report.sampleReport&&<div style={{padding:"12px 14px"}}>
+        {/* Executive Summary */}
+        <div style={{marginBottom:14}}>
+          <div style={{fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:1,color:"var(--t3)",marginBottom:6}}>📌 Executive Summary</div>
+          {report.sampleReport.summary.map((s,i)=><div key={i} style={{fontSize:11,color:"var(--t2)",padding:"4px 0 4px 20px",position:"relative",lineHeight:1.5,borderBottom:"1px solid var(--s2)"}}><span style={{position:"absolute",left:0,fontWeight:700,color:"var(--ac)",fontSize:12}}>{i+1}.</span>{s}</div>)}
+        </div>
+        {/* Key Metrics */}
+        <div style={{marginBottom:14}}>
+          <div style={{fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:1,color:"var(--t3)",marginBottom:6}}>📊 Key Metrics</div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:4}}>
+            {report.sampleReport.metrics.map((m,i)=><div key={i} style={{background:"var(--s2)",borderRadius:6,padding:"6px 8px",textAlign:"center"}}>
+              <div style={{fontSize:8,color:"var(--t3)",textTransform:"uppercase"}}>{m.m}</div>
+              <div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:13,fontWeight:700,color:m.t==="down"?"#10b981":m.t==="up"?"#f59e0b":"var(--t1)"}}>{m.v}</div>
+              <div style={{fontSize:7,color:m.t==="down"?"#10b981":m.t==="up"?"#f59e0b":"var(--t3)"}}>{m.t==="down"?"↓ Favorable":m.t==="up"?"↑ Needs Attention":"— Stable"}</div>
+            </div>)}
+          </div>
+        </div>
+        {/* Top Findings */}
+        <div style={{marginBottom:10}}>
+          <div style={{fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:1,color:"var(--t3)",marginBottom:6}}>🔍 Top Findings (Ranked by ₹ Impact)</div>
+          {report.sampleReport.findings.map((f,i)=><div key={i} style={{background:i===0?"rgba(37,99,235,.05)":"transparent",border:"1px solid var(--s2)",borderRadius:6,padding:8,marginBottom:4}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+              <div style={{flex:1}}>
+                <div style={{fontSize:11,fontWeight:600,color:"var(--t1)",lineHeight:1.4}}>{f.f}</div>
+                <div style={{fontSize:10,color:"var(--ac)",marginTop:2}}>→ Action: {f.a}</div>
+              </div>
+              <div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:11,fontWeight:700,color:"#10b981",whiteSpace:"nowrap",background:"rgba(16,185,129,.08)",padding:"2px 8px",borderRadius:4}}>{f.i}</div>
+            </div>
+          </div>)}
+        </div>
+        <div style={{fontSize:9,color:"var(--t3)",textAlign:"center",fontStyle:"italic",paddingTop:6,borderTop:"1px dashed var(--s3)"}}>This is a sample with representative data — your actual report will be customized to your uploaded data</div>
+      </div>}
+      {!report.sampleReport&&<div style={{padding:"8px 14px"}}>{report.sampleInsights.map((s,i)=><div key={i} style={{fontSize:11,color:"var(--t2)",padding:"3px 0",paddingLeft:14,position:"relative"}}><span style={{position:"absolute",left:0,color:"var(--ac)"}}>✓</span>{s}</div>)}</div>}
+    </div>
+  </div>);
+
+  if(status==="mapping"&&mapFields)return(<DataMapper files={files} fields={mapFields} onMapped={handleMapped} onBack={()=>setStatus("upload")}/>);
+
+  if(status==="mapped"&&dataSummary)return(<div style={{maxWidth:700}}>
+    <button className="mob-back" onClick={()=>setStatus("mapping")}>← Back to Column Mapping</button>
+    <div style={{background:"rgba(16,185,129,.06)",border:"1px solid rgba(16,185,129,.2)",borderRadius:10,padding:16,marginBottom:16}}>
+      <div style={{fontSize:15,fontWeight:700,marginBottom:8}}>✅ Data Ready for Analysis</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,fontSize:12,color:"var(--t2)"}}>
+        <div>📄 File: <strong>{dataSummary.fileName}</strong></div>
+        <div>📑 Sheet: <strong>{dataSummary.sheetName}</strong></div>
+        <div>📋 Rows: <strong>{dataSummary.totalRows.toLocaleString()}</strong></div>
+        <div>🔗 Mapped: <strong>{dataSummary.mappedFields.length} fields</strong></div>
+      </div>
+      <div style={{fontSize:10,color:"var(--t3)",marginTop:8}}>Fields: {dataSummary.mappedFields.join(", ")}</div>
+      {dataSummary.anonymized&&<div style={{fontSize:10,color:"var(--ok)",marginTop:6,fontWeight:600}}>🛡️ Supplier names anonymized — AI will see Supplier_001, Supplier_002, etc.</div>}
+    </div>
+    <textarea className="mod-notes" value={notes} onChange={e=>setNotes(e.target.value)} placeholder="Additional context: focus areas, exclusions, time period..."/>
+    {err&&<div className="mod-err">{err}</div>}
+    {loading&&<div className="mod-loading">🤖 AI analyzing your {dataSummary.totalRows.toLocaleString()} rows... This may take 30-60 seconds for large datasets.</div>}
+    <div style={{display:"flex",gap:10}}>
+      <button className="btn-pri" style={{flex:1,padding:"12px",fontSize:14}} onClick={runAI} disabled={loading}>⚡ Generate AI Report ({report.credits} credits) →</button>
+    </div>
+    <div style={{textAlign:"center",marginTop:10,fontSize:10,color:"var(--t3)"}}>{credits} credits available</div>
+  </div>);
+
+  if(status==="result"&&result)return(<div style={{maxWidth:750}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,flexWrap:"wrap",gap:6}}>
+      <button className="btn-sec" style={{fontSize:11}} onClick={()=>setStatus("upload")}>← Back</button>
+      <div style={{display:"flex",gap:6}}>
+        <button className="btn-pri" style={{fontSize:11}} onClick={()=>window.print()}>📄 Print / PDF</button>
+        {!expertSent&&<button className="btn-sec" style={{fontSize:11,borderColor:"var(--warn)",color:"var(--warn)"}} onClick={requestExpert}>👨‍💼 Expert Review — {report.expertPrice}</button>}
+        {expertSent&&<span style={{fontSize:10,color:"var(--ok)",fontWeight:600}}>✅ Expert Requested</span>}
+      </div>
+    </div>
+    <div className="rpt-header"><span style={{fontSize:24}}>{report.icon}</span><div><div style={{fontSize:18,fontWeight:800,fontFamily:"'Bricolage Grotesque'"}}>{result.title||report.name}</div><div style={{fontSize:10,color:"var(--t3)"}}>AI-Generated • {new Date().toLocaleDateString("en-IN")} • CostLens</div><div style={{fontSize:8,color:"var(--t3)",marginTop:2,fontStyle:"italic"}}>{AI_DISCLAIMER}</div></div></div>
+    <div className="rpt-section"><div className="rpt-section-title">📌 Executive Summary</div>{result.executiveSummary?.map((s,i)=><div key={i} className="rpt-finding-item"><span className="rpt-num">{i+1}</span><span>{s}</span></div>)}</div>
+    {result.keyMetrics?.length>0&&<div className="rpt-section"><div className="rpt-section-title">📊 Key Metrics</div><div className="rpt-metrics-grid">{result.keyMetrics.map((m,i)=><div key={i} className="rpt-metric-card"><div style={{fontSize:9,color:"var(--t3)",textTransform:"uppercase"}}>{m.metric}</div><div style={{fontFamily:"IBM Plex Mono",fontSize:16,fontWeight:700,color:m.trend==="down"?"var(--ok)":m.trend==="up"?"var(--err)":"var(--t1)"}}>{m.value}</div><div style={{fontSize:8,color:m.trend==="down"?"var(--ok)":m.trend==="up"?"var(--err)":"var(--t3)"}}>{m.trend==="down"?"↓ Favorable":"↑ Unfavorable"}</div></div>)}</div></div>}
+    {result.findings?.length>0&&<div className="rpt-section"><div className="rpt-section-title">🔍 Top Findings</div>{result.findings.map((f,i)=><div key={i} className="rpt-finding-row"><div className="rpt-finding-rank">#{f.rank||i+1}</div><div style={{flex:1}}><div style={{fontSize:12,fontWeight:600}}>{f.finding}</div><div style={{fontSize:10,color:"var(--t3)"}}>Impact: {f.impact}</div></div><div style={{fontSize:10,color:"var(--ac)",maxWidth:200}}>{f.action}</div></div>)}</div>}
+    {result.riskAreas?.length>0&&<div className="rpt-section"><div className="rpt-section-title">⚠️ Risk Areas</div>{result.riskAreas.map((r,i)=><div key={i} style={{display:"flex",gap:8,alignItems:"flex-start",padding:"6px 0",borderBottom:"1px solid var(--s2)"}}><span className={`rpt-sev ${r.severity?.toLowerCase()}`}>{r.severity}</span><div style={{flex:1}}><div style={{fontSize:12,fontWeight:500}}>{r.risk}</div><div style={{fontSize:10,color:"var(--t2)"}}>{r.recommendation}</div>{r.impact&&<div style={{fontSize:9,color:"var(--err)",marginTop:2}}>Potential impact: {r.impact}</div>}</div></div>)}</div>}
+    {result.recommendations?.length>0&&<div className="rpt-section"><div className="rpt-section-title">💡 Recommendations</div>{result.recommendations.map((r,i)=><div key={i} style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:6,padding:10,marginBottom:4}}><div style={{fontSize:12,fontWeight:600}}>{r.recommendation}</div><div style={{display:"flex",gap:12,marginTop:3,flexWrap:"wrap"}}><span style={{fontSize:10,color:"var(--t3)"}}>⏱ {r.timeline}</span><span style={{fontSize:10,color:"var(--ok)"}}>💰 {r.expectedImpact}</span>{r.effort&&<span style={{fontSize:10,color:r.effort==="Low"?"#10b981":r.effort==="High"?"#f59e0b":"var(--t3)"}}>⚡ {r.effort} effort</span>}</div></div>)}</div>}
+    {result.quickWins?.length>0&&<div className="rpt-section"><div className="rpt-section-title">⚡ Quick Wins (Next 30 Days)</div><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>{result.quickWins.map((q,i)=><div key={i} style={{background:"rgba(16,185,129,.04)",border:"1px solid rgba(16,185,129,.15)",borderRadius:6,padding:8}}><div style={{fontSize:11,fontWeight:600}}>{q.action}</div><div style={{fontSize:9,color:"var(--t3)",marginTop:2}}>Effort: {q.effort} • Impact: {q.impact}</div></div>)}</div></div>}
+    {result.negotiationPoints?.length>0&&<div className="rpt-section"><div className="rpt-section-title">🎯 Negotiation Ammunition</div>{result.negotiationPoints.map((p,i)=><div key={i} style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:6,padding:10,marginBottom:4,display:"flex",gap:8,alignItems:"flex-start"}}><span style={{color:"var(--ac)",fontWeight:700,fontSize:14,lineHeight:1}}>›</span><div style={{fontSize:11,color:"var(--t2)",lineHeight:1.5}}>{p}</div></div>)}</div>}
+    <div className="rpt-expert-cta">
+      {expertSent?<div style={{background:"rgba(16,185,129,.06)",border:"1px solid rgba(16,185,129,.25)",borderRadius:10,padding:16,textAlign:"center"}}>
+        <div style={{fontSize:24,marginBottom:6}}>✅</div>
+        <div style={{fontSize:15,fontWeight:700,marginBottom:4}}>Expert Review Requested!</div>
+        <div style={{fontSize:12,color:"var(--t2)",lineHeight:1.6}}>Our procurement analyst will review this AI report, validate all findings against your data, add market context and benchmarks, and deliver a board-presentation-ready PDF.</div>
+        <div style={{fontSize:12,fontWeight:600,color:"var(--ac)",marginTop:8}}>We'll contact you within {report.turnaround} at support@costlens.technology</div>
+        <div style={{fontSize:10,color:"var(--t3)",marginTop:6}}>Price: {report.expertPrice} (one-time) • Payment link will be shared after scope confirmation</div>
+      </div>
+      :<div>
+        <div style={{fontSize:13,fontWeight:700,marginBottom:4}}>Need a polished, board-ready version?</div>
+        <div style={{fontSize:11,color:"var(--t2)",margin:"4px 0 10px",lineHeight:1.6}}>Our procurement expert reviews this AI analysis, validates findings against your raw data, adds market context and industry benchmarks, and delivers a presentation-ready PDF with executive summary.</div>
+        <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+          <button className="btn-pri" style={{background:"var(--warn)",fontSize:13,padding:"10px 24px"}} onClick={requestExpert}>👨‍💼 Request Expert Review — {report.expertPrice}</button>
+          <div style={{fontSize:10,color:"var(--t3)"}}>Delivered in {report.turnaround} • One-time fixed price</div>
+        </div>
+      </div>}
+    </div>
+  </div>);
+  return null;
+}
+
+// ─── EBOOK PDF GENERATOR ───
+async function generateEbookPDF(book, preview) {
+  // Dynamically load jsPDF if not available
+  if (!window.jspdf) {
+    await new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js";
+      s.onload = resolve; s.onerror = reject;
+      document.head.appendChild(s);
+    });
+  }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: "mm", format: "a4" });
+  const W = 210, H = 297, M = 25;
+  const pw = W - 2 * M;
+  let y = 0;
+  const addPage = () => { doc.addPage(); y = M; };
+  const checkY = (need) => { if (y + need > H - M) addPage(); };
+
+  // Helper: wrap text and return lines
+  const wrap = (text, size, maxW) => {
+    doc.setFontSize(size);
+    return doc.splitTextToSize(text, maxW || pw);
+  };
+
+  // ── COVER PAGE ──
+  // Background
+  const hex = book.bg || "#0f2744";
+  const r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
+  doc.setFillColor(r, g, b);
+  doc.rect(0, 0, W, H, "F");
+
+  // Accent bar
+  const ah = book.accent || "#f59e0b";
+  const ar = parseInt(ah.slice(1,3),16), ag = parseInt(ah.slice(3,5),16), ab = parseInt(ah.slice(5,7),16);
+  doc.setFillColor(ar, ag, ab);
+  doc.rect(0, 0, W, 4, "F");
+  doc.rect(0, H - 4, W, 4, "F");
+
+  // Series label
+  doc.setFontSize(10);
+  doc.setTextColor(ar, ag, ab);
+  y = 60;
+  doc.text("PROCUREMENT EXCELLENCE SERIES", W / 2, y, { align: "center" });
+
+  // Book number
+  doc.setFontSize(48);
+  doc.setTextColor(ar, ag, ab);
+  y += 20;
+  doc.text(String(book.id).padStart(2, "0"), W / 2, y, { align: "center" });
+
+  // Title
+  doc.setFontSize(26);
+  doc.setTextColor(255, 255, 255);
+  y += 25;
+  const titleLines = doc.splitTextToSize(book.title, pw);
+  titleLines.forEach(line => { doc.text(line, W / 2, y, { align: "center" }); y += 12; });
+
+  // Subtitle
+  doc.setFontSize(14);
+  doc.setTextColor(ar, ag, ab);
+  y += 5;
+  doc.text(book.sub, W / 2, y, { align: "center" });
+
+  // Footer
+  doc.setFontSize(10);
+  doc.setTextColor(180, 180, 180);
+  doc.text("CostLens Publication", W / 2, H - 30, { align: "center" });
+  doc.setFontSize(8);
+  doc.text(book.pages + " pages | costlens.technology", W / 2, H - 22, { align: "center" });
+
+  // ── TABLE OF CONTENTS ──
+  addPage();
+  doc.setFillColor(255, 255, 255);
+  doc.rect(0, 0, W, H, "F");
+  doc.setFontSize(22);
+  doc.setTextColor(30, 41, 59);
+  doc.text("Table of Contents", M, y);
+  y += 5;
+  doc.setDrawColor(ar, ag, ab);
+  doc.setLineWidth(0.8);
+  doc.line(M, y, M + 40, y);
+  y += 15;
+
+  if (preview && preview.toc) {
+    preview.toc.forEach((ch, i) => {
+      checkY(12);
+      doc.setFontSize(12);
+      doc.setTextColor(30, 41, 59);
+      doc.text(ch, M, y);
+      const pg = Math.floor(book.pages * ((i + 1) / preview.toc.length));
+      doc.setTextColor(150, 150, 150);
+      doc.text(String(pg), W - M, y, { align: "right" });
+      y += 10;
+      if (i < preview.toc.length - 1) {
+        doc.setDrawColor(230, 230, 230);
+        doc.setLineWidth(0.2);
+        doc.line(M, y - 4, W - M, y - 4);
+      }
+    });
+  }
+
+  // ── SAMPLE CONTENT PAGES ──
+  if (preview && preview.sample) {
+    addPage();
+    doc.setFillColor(255, 255, 255);
+    doc.rect(0, 0, W, H, "F");
+
+    const paragraphs = preview.sample.split("\n");
+    paragraphs.forEach(para => {
+      const trimmed = para.trim();
+      if (!trimmed) { y += 4; return; }
+
+      // Chapter headings
+      if (trimmed.startsWith("Chapter ") || trimmed.startsWith("Stage ") || trimmed.startsWith("Phase ")) {
+        checkY(16);
+        doc.setFontSize(16);
+        doc.setTextColor(ar, ag, ab);
+        const lines = wrap(trimmed, 16);
+        lines.forEach(l => { doc.text(l, M, y); y += 8; });
+        y += 4;
+      }
+      // Sub-points with bullets
+      else if (trimmed.startsWith("\u2022") || trimmed.startsWith("-") || trimmed.startsWith("\u2192")) {
+        checkY(8);
+        doc.setFontSize(10);
+        doc.setTextColor(60, 60, 60);
+        const lines = wrap(trimmed, 10, pw - 5);
+        lines.forEach(l => { doc.text(l, M + 5, y); y += 5.5; });
+      }
+      // Numbered items
+      else if (/^\d+\./.test(trimmed)) {
+        checkY(10);
+        doc.setFontSize(11);
+        doc.setTextColor(30, 41, 59);
+        const lines = wrap(trimmed, 11);
+        lines.forEach(l => { doc.text(l, M, y); y += 6; });
+        y += 2;
+      }
+      // Regular paragraphs
+      else {
+        checkY(10);
+        doc.setFontSize(11);
+        doc.setTextColor(50, 50, 50);
+        const lines = wrap(trimmed, 11);
+        lines.forEach(l => { doc.text(l, M, y); y += 5.5; });
+        y += 3;
+      }
+    });
+  }
+
+  // ── CONTINUED CHAPTERS (generate structure for remaining chapters) ──
+  if (preview && preview.toc) {
+    preview.toc.forEach((ch, i) => {
+      if (i === 0) return; // Already covered in sample
+      addPage();
+      doc.setFillColor(255, 255, 255);
+      doc.rect(0, 0, W, H, "F");
+
+      // Chapter header
+      doc.setFontSize(20);
+      doc.setTextColor(ar, ag, ab);
+      doc.text(ch, M, y);
+      y += 8;
+      doc.setDrawColor(ar, ag, ab);
+      doc.setLineWidth(0.5);
+      doc.line(M, y, M + 30, y);
+      y += 15;
+
+      // Chapter intro text
+      doc.setFontSize(11);
+      doc.setTextColor(80, 80, 80);
+      const chName = ch.replace(/^Ch \d+:\s*/, "").replace(/^Appendix:\s*/, "");
+      const introTexts = [
+        "This chapter provides a comprehensive framework for " + chName.toLowerCase() + " in the context of Indian manufacturing procurement.",
+        "We cover practical methodologies, real-world case studies from companies with Rs 50-5,000 Cr annual procurement spend, and ready-to-use templates that you can implement immediately.",
+        "Key topics covered in this chapter:",
+      ];
+      introTexts.forEach(t => {
+        const lines = wrap(t, 11);
+        lines.forEach(l => { doc.text(l, M, y); y += 6; });
+        y += 3;
+      });
+
+      // Generate relevant sub-topics
+      const topics = [
+        "Framework overview and methodology",
+        "Step-by-step implementation guide",
+        "Common pitfalls and how to avoid them",
+        "Real-world case study with quantified results",
+        "Templates and checklists for your team",
+        "Key metrics and KPIs to track progress",
+        "Integration with existing procurement processes",
+      ];
+      y += 5;
+      topics.slice(0, 5 + (i % 3)).forEach(topic => {
+        checkY(8);
+        doc.setFontSize(10);
+        doc.setTextColor(ar, ag, ab);
+        doc.text("\u2022", M + 2, y);
+        doc.setTextColor(60, 60, 60);
+        doc.text(topic, M + 8, y);
+        y += 7;
+      });
+
+      // Add some body text
+      y += 10;
+      checkY(30);
+      doc.setFontSize(11);
+      doc.setTextColor(50, 50, 50);
+      const bodyTexts = [
+        "The approaches outlined in this chapter have been validated across multiple manufacturing environments — from bicycle and automotive to electrical and general engineering sectors.",
+        "Each framework includes specific adaptation guidelines for different company sizes and procurement maturity levels, ensuring relevance whether you manage Rs 10 Cr or Rs 1,000 Cr in annual spend.",
+        "Implementation timelines are provided with realistic milestones, resource requirements, and expected outcomes at each stage.",
+      ];
+      bodyTexts.forEach(t => {
+        checkY(15);
+        const lines = wrap(t, 11);
+        lines.forEach(l => { doc.text(l, M, y); y += 5.5; });
+        y += 4;
+      });
+
+      // Footer on each page
+      doc.setFontSize(8);
+      doc.setTextColor(180, 180, 180);
+      doc.text("CostLens Publication | " + book.title, M, H - 12);
+      doc.text("Page " + (doc.internal.getNumberOfPages()), W - M, H - 12, { align: "right" });
+    });
+  }
+
+  // ── BACK COVER ──
+  addPage();
+  doc.setFillColor(r, g, b);
+  doc.rect(0, 0, W, H, "F");
+  doc.setFontSize(18);
+  doc.setTextColor(255, 255, 255);
+  doc.text("About CostLens", W / 2, 80, { align: "center" });
+  doc.setFontSize(11);
+  doc.setTextColor(200, 200, 200);
+  const aboutLines = doc.splitTextToSize(
+    "CostLens is an AI-powered procurement costing platform built for Indian manufacturing. " +
+    "We provide zero-based costing tools, AI analysis reports, commodity intelligence, and commercial tools " +
+    "that help procurement teams make data-driven decisions and deliver measurable cost savings.", pw - 20);
+  let ay = 95;
+  aboutLines.forEach(l => { doc.text(l, W / 2, ay, { align: "center" }); ay += 6; });
+  ay += 15;
+  doc.setFontSize(12);
+  doc.setTextColor(ar, ag, ab);
+  doc.text("costlens.technology", W / 2, ay, { align: "center" });
+
+  // Save
+  doc.save("CostLens-Ebook-" + book.id + "-" + book.title.replace(/[^a-zA-Z0-9]/g, "-").replace(/-+/g, "-") + ".pdf");
+}
+
+// MAIN APP — Landing + Auth + Platform + Ebooks + Reports
+// ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// HERO — Animated Cost Breakup
+// ═══════════════════════════════════════════════════════════════
+function HeroSection({onSignup}){
+  const visRef=useRef(null);
+  const [vis,setVis]=useState(false);
+  const [counts,setCounts]=useState({m:0,t:0,s:0});
+  useEffect(()=>{
+    const el=visRef.current;if(!el)return;
+    const obs=new IntersectionObserver(([e])=>{if(e.isIntersecting)setVis(true)},{threshold:0.15});
+    obs.observe(el);return()=>obs.disconnect();
+  },[]);
+  useEffect(()=>{
+    if(!vis)return;let start=null;
+    const step=(ts)=>{if(!start)start=ts;const p=Math.min((ts-start)/1800,1);setCounts({m:Math.floor(p*13),t:Math.floor(p*50),s:Math.floor(p*847)});if(p<1)requestAnimationFrame(step)};
+    requestAnimationFrame(step);
+  },[vis]);
+  const parts=[
+    {label:"Raw Material",val:149,pct:62,color:"#2d7ff9",delay:0},
+    {label:"Processing",val:35,pct:15,color:"#10b981",delay:.15},
+    {label:"Overhead",val:28,pct:12,color:"#f59e0b",delay:.3},
+    {label:"Sec. Ops",val:12,pct:5,color:"#a78bfa",delay:.45},
+    {label:"Profit",val:16,pct:6,color:"#f43f5e",delay:.6},
+  ];
+  return(
+  <section style={{padding:"120px 0 60px",position:"relative",overflow:"hidden"}}>
+    <div style={{position:"absolute",inset:0,background:"radial-gradient(ellipse 80% 60% at 70% 30%,rgba(45,127,249,.08),transparent),radial-gradient(ellipse 50% 50% at 20% 80%,rgba(16,185,129,.05),transparent)",pointerEvents:"none"}}/>
+    <div className="wrap"><div className="hero-grid-anim" style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:50,alignItems:"center"}}>
+      <div>
+        <div className="badge">AI-Powered Procurement Platform</div>
+        <h1 style={{fontFamily:"'Bricolage Grotesque',sans-serif",fontSize:"clamp(32px,5vw,52px)",fontWeight:800,lineHeight:1.05,letterSpacing:-2,marginBottom:12}}>Every Rupee.<br/><span style={{background:"linear-gradient(135deg,var(--ac),#6366f1)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>Traced.</span></h1>
+        <p style={{fontSize:16,color:"var(--t2)",lineHeight:1.7,marginBottom:20,maxWidth:480}}>Zero-based costing for manufacturing procurement. 13 modules, 5 AI commercial tools, 50+ templates. From should-cost to contract analysis — every procurement need in one platform.</p>
+        <div style={{display:"flex",gap:10,flexWrap:"wrap"}}><button className="btn-pri" style={{fontSize:15,padding:"12px 28px"}} onClick={onSignup}>{BETA_CONFIG.enabled?"🧪 Join Private Beta →":"Start Free →"}</button><button className="btn-sec" style={{fontSize:15,padding:"12px 28px"}} onClick={()=>document.getElementById("modules")?.scrollIntoView({behavior:"smooth"})}>See Modules</button></div>
+        <div style={{display:"flex",gap:24,marginTop:24}}>{[
+          [counts.m+"","Modules"],[counts.t+"+","Templates"],["₹0","To Start"]
+        ].map(([v,l],i)=><div key={i} style={{textAlign:"center"}}><div style={{fontFamily:"IBM Plex Mono",fontSize:22,fontWeight:700,color:"var(--ac)"}}>{v}</div><div style={{fontSize:9,color:"var(--t3)",textTransform:"uppercase",letterSpacing:.5}}>{l}</div></div>)}</div>
+      </div>
+      {/* Animated Cost Dissection Card */}
+      <div ref={visRef}>
+        <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:16,padding:24,boxShadow:"0 20px 60px rgba(0,0,0,.4)",position:"relative"}}>
+          <div style={{position:"absolute",top:-1,left:30,right:30,height:2,background:"linear-gradient(90deg,transparent,var(--ac),transparent)",opacity:.3}}/>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+            <div style={{fontFamily:"'Bricolage Grotesque',sans-serif",fontWeight:700,fontSize:14}}>🏭 CNC Housing — Should-Cost</div>
+            <div style={{fontFamily:"IBM Plex Mono",fontSize:28,fontWeight:700,color:"var(--ac)"}}>₹240</div>
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {parts.map((p,i)=>(
+              <div key={i} style={{display:"flex",alignItems:"center",gap:10}}>
+                <div style={{fontSize:11,color:"var(--t2)",width:80,textAlign:"right",flexShrink:0}}>{p.label}</div>
+                <div style={{flex:1,height:28,background:"var(--s2)",borderRadius:6,overflow:"hidden",position:"relative"}}>
+                  <div style={{
+                    height:"100%",borderRadius:6,display:"flex",alignItems:"center",padding:"0 10px",
+                    fontFamily:"IBM Plex Mono",fontSize:11,fontWeight:600,color:"#fff",
+                    background:p.color,
+                    width:vis?p.pct+"%":"0%",
+                    transition:`width 1.2s cubic-bezier(.22,.61,.36,1) ${p.delay}s`
+                  }}>₹{p.val}</div>
+                </div>
+                <div style={{fontFamily:"IBM Plex Mono",fontSize:12,fontWeight:600,width:44,flexShrink:0,color:p.color}}>{p.pct}%</div>
+              </div>
+            ))}
+          </div>
+          {/* Savings callout */}
+          <div style={{marginTop:14,padding:"10px 14px",background:"rgba(16,185,129,.06)",border:"1px solid rgba(16,185,129,.15)",borderRadius:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div style={{fontSize:11,color:"var(--t2)"}}>Supplier Quote: <span style={{fontFamily:"IBM Plex Mono",fontWeight:600,color:"var(--err)",textDecoration:"line-through"}}>₹312</span></div>
+            <div style={{fontSize:12,fontFamily:"IBM Plex Mono",fontWeight:700,color:"var(--ok)"}}>Save ₹72/pc (23%)</div>
+          </div>
+        </div>
+        {/* Floating badge */}
+        <div style={{position:"relative",display:"flex",justifyContent:"center",marginTop:-12}}>
+          <div style={{background:"var(--s2)",border:"1px solid var(--s3)",borderRadius:20,padding:"6px 16px",fontSize:10,color:"var(--t2)",display:"inline-flex",alignItems:"center",gap:6,boxShadow:"0 8px 20px rgba(0,0,0,.3)"}}>
+            <span style={{width:6,height:6,borderRadius:"50%",background:"var(--ok)",display:"inline-block",animation:"pulse 2s infinite"}}/>
+            Live cost dissection — updates in real-time
+          </div>
+        </div>
+      </div>
+    </div></div>
+    <style>{`@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}@media(max-width:900px){.hero-grid-anim{grid-template-columns:1fr!important;gap:30px!important;text-align:center}}`}</style>
+  </section>);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// COMMODITY INTELLIGENCE MODULE (Professional Plan)
+// ═══════════════════════════════════════════════════════════════
+const CI_AC=[
+{id:"steel-hrc",n:"Steel HRC",u:"₹/MT",cat:"Ferrous",ic:"🔩",ix:"SIAM/JSW"},
+{id:"steel-crc",n:"Steel CRC",u:"₹/MT",cat:"Ferrous",ic:"📄",ix:"SIAM/JSW"},
+{id:"steel-gp",n:"GP Steel",u:"₹/MT",cat:"Ferrous",ic:"🛡",ix:"JSW/TATA"},
+{id:"alu-lme",n:"Aluminum LME",u:"$/MT",cat:"Non-Ferrous",ic:"⚡",ix:"LME"},
+{id:"alu-in",n:"Aluminum India",u:"₹/kg",cat:"Non-Ferrous",ic:"🏭",ix:"Hindalco"},
+{id:"copper",n:"Copper",u:"$/MT",cat:"Non-Ferrous",ic:"🔌",ix:"LME/MCX"},
+{id:"zinc",n:"Zinc",u:"$/MT",cat:"Non-Ferrous",ic:"🔋",ix:"LME"},
+{id:"brass",n:"Brass",u:"₹/kg",cat:"Non-Ferrous",ic:"🔧",ix:"Jamnagar"},
+{id:"pp",n:"PP Granules",u:"₹/kg",cat:"Polymers",ic:"🧪",ix:"RIL/IOCL"},
+{id:"hdpe",n:"HDPE",u:"₹/kg",cat:"Polymers",ic:"📦",ix:"RIL/Haldia"},
+{id:"abs",n:"ABS",u:"₹/kg",cat:"Polymers",ic:"🎯",ix:"LG/SABIC"},
+{id:"nr",n:"Natural Rubber RSS4",u:"₹/kg",cat:"Rubber",ic:"🌿",ix:"Rubber Board"},
+{id:"sbr",n:"SBR Rubber",u:"₹/kg",cat:"Rubber",ic:"⚙",ix:"Reliance"},
+{id:"ss304",n:"SS 304",u:"₹/kg",cat:"Specialty",ic:"✨",ix:"Jindal/POSCO"},
+{id:"crude",n:"Crude Brent",u:"$/bbl",cat:"Energy",ic:"🛢",ix:"Brent ICE"},
+];
+const CI_CATS=[...new Set(CI_AC.map(m=>m.cat))];
+const ciSC=s=>s==="BUY"?"#10b981":s==="WAIT"?"#ef4444":s==="HOLD"?"#f59e0b":"#6366f1";
+const ciSB=s=>s==="BUY"?"rgba(16,185,129,.07)":s==="WAIT"?"rgba(239,68,68,.07)":s==="HOLD"?"rgba(245,158,11,.07)":"rgba(99,102,241,.07)";
+const CI_SYS="You are CostLens AI, a commodity procurement intelligence engine for Indian manufacturing. IMPORTANT: Use web search to find CURRENT prices for each commodity requested. Search for today's SIAM steel circular rates, LME spot prices, MCX India rates, RIL/IOCL polymer prices, Rubber Board Kottayam RSS4 rates, Jindal/POSCO stainless prices, and Brent crude. Use these REAL current prices in your analysis. CRITICAL: After searching, your FINAL text response must contain ONLY the JSON object below. No explanation, no preamble, no 'Based on...', JUST the raw JSON starting with {. Schema: {\"items\":[{\"id\":\"commodity-id\",\"signal\":\"BUY|HOLD|WAIT|MONITOR\",\"conf\":\"High|Med|Low\",\"outlook\":\"3-4 sentence market outlook with price direction and key drivers\",\"decision\":\"Specific buying action: what to do, how much, timing. 2-3 sentences\",\"reasons\":\"3-4 distinct reasons separated by | pipe character\",\"savImpact\":\"Quantified INR saving or cost impact based on user volume. 2 sentences with numbers\",\"riskShort\":\"Short-term 30-60 day risk. 2 sentences\",\"riskLong\":\"Long-term 90+ day risk. 2 sentences\",\"actions\":[{\"t\":\"action title\",\"d\":\"1 sentence description\",\"type\":\"email|brief|calc|alert\"}],\"script\":\"Exact negotiation words for supplier meeting. 2-3 sentences\",\"clause\":\"Recommended contract formula or pricing clause\"}],\"summary\":\"2-3 sentence overall market summary\",\"tip\":\"One actionable weekly procurement tip\"}";
+function ciBPr(wl){let p="Date: "+new Date().toISOString().split("T")[0]+"\nIMPORTANT: First search the web for current/latest prices of each commodity below. Then analyze for Indian mfg procurement buyer:\n\n";wl.forEach(w=>{const m=CI_AC.find(x=>x.id===w.id);if(m)p+=m.n+" ("+m.id+"): "+m.ix+" | "+m.u+" | Volume: "+w.vol+" "+w.per+"\n"});p+="\nSearch for CURRENT prices from reliable sources FIRST. Then for EACH: signal, conf, outlook, decision, reasons (|-separated), savImpact, riskShort, riskLong, actions (2-3), script, clause. Plus summary and tip. JSON only.";return p}
+function ciTP(t){let c=stripCites(t).replace(/```json|```/g,"").trim();const ji=c.indexOf('{"items"');if(ji>=0)c=c.substring(ji);else{const fi=c.indexOf("{");if(fi>=0)c=c.substring(fi);}const li=c.lastIndexOf("}");if(li>=0)c=c.substring(0,li+1);try{return JSON.parse(c)}catch(e){let f=c;if((f.match(/"/g)||[]).length%2!==0)f+='"';let ob=(f.match(/{/g)||[]).length-(f.match(/}/g)||[]).length;let ab=(f.match(/\[/g)||[]).length-(f.match(/\]/g)||[]).length;for(let i=0;i<ab;i++)f+="]";for(let i=0;i<ob;i++)f+="}";try{return JSON.parse(f)}catch(e2){const m=c.match(/\{"items"\s*:\s*\[[\s\S]*\]/);if(m){let r=m[0];if(!r.endsWith("}"))r+="}";return JSON.parse(r)}throw new Error(e2.message)}}}
+
+// ─── AI TOOL RUNNER COMPONENT ───
+function AIToolRunner({tool,credits,useCredit,user,onBack}){
+  const[formData,setFormData]=useState({});const[files,setFiles]=useState([]);const[notes,setNotes]=useState("");
+  const[loading,setLoading]=useState(false);const[err,setErr]=useState(null);const[result,setResult]=useState(null);
+  const[actRes,setActRes]=useState(null);const[actLd,setActLd]=useState(null);
+  const setField=(k,v)=>setFormData(p=>({...p,[k]:v}));
+
+  // Smart Actions runner
+  const runSmartAction=async(action,context)=>{setActLd(action.t);setActRes(null);try{
+    const prompts={
+      "email":"Write a professional procurement email. Context: "+context+". Action: "+action.t+" — "+action.d+". Include subject line. Be specific with numbers and data from the analysis. Professional tone suitable for Indian manufacturing.",
+      "brief":"Create a 1-page executive procurement brief. Context: "+context+". Action: "+action.t+" — "+action.d+". Include: Situation Summary, Key Findings, Recommended Action, Financial Impact, Next Steps. Use ₹ figures.",
+      "calc":"Do a detailed cost/savings calculation. Context: "+context+". Action: "+action.t+" — "+action.d+". Show numbers, formulas, comparison scenarios. Use ₹ and Indian manufacturing context.",
+      "alert":"Create a monitoring/alert brief. Context: "+context+". Action: "+action.t+" — "+action.d+". Include: trigger conditions, thresholds, escalation actions, review timeline."
+    };
+    const r=await apiFetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:API_HEADERS,
+      body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:4000,system:"You are a procurement expert assistant for Indian manufacturing. Generate ready-to-use professional content. Be specific with numbers and actionable.",messages:[{role:"user",content:prompts[action.type]||prompts.brief}]})});
+    if(!r.ok)throw new Error("API "+r.status);const d=await r.json();const txt=stripCites(d.content.filter(x=>x.type==="text").map(x=>x.text).join("\n"));
+    setActRes({title:action.t,type:action.type,content:txt});}catch(e){setActRes({title:action.t,type:"error",content:"Failed: "+e.message})}finally{setActLd(null)}};
+
+  // Generate context-specific smart actions per tool
+  const getSmartActions=(toolId,res)=>{
+    if(toolId==="price-check")return[
+      {t:"Draft Price Reduction Email",d:"AI-written email to supplier citing fair price range and requesting revised quotation",type:"email"},
+      {t:"Cost Breakdown Brief for Management",d:"Executive summary of price analysis with recommendation for approval/rejection",type:"brief"},
+      {t:"Savings Calculator",d:"Calculate annual savings if negotiated to fair price range across full volume",type:"calc"},
+      {t:"Price Alert — Track This Item",d:"Set up monitoring brief for this item's market price movement",type:"alert"}
+    ];
+    if(toolId==="contract-analyzer")return[
+      {t:"Email Supplier — Request Amendments",d:"Draft email listing risky clauses that need revision before signing",type:"email"},
+      {t:"Legal Review Brief",d:"Executive summary of contract risks for internal legal/management review",type:"brief"},
+      {t:"Risk-Adjusted Cost Impact",d:"Calculate ₹ impact of identified risks — LD exposure, auto-renewal cost, missing protections",type:"calc"},
+      {t:"Contract Renewal Alert",d:"Create monitoring brief for contract review dates, auto-renewal traps, revision windows",type:"alert"}
+    ];
+    if(toolId==="rfq-comparator")return[
+      {t:"Award Letter to Winner",d:"Draft professional award letter to recommended vendor with terms",type:"email"},
+      {t:"Regret Letters to Others",d:"Draft professional regret letters to non-selected vendors",type:"email"},
+      {t:"Techno-Commercial Brief for Management",d:"Board-ready comparison summary with recommendation and justification",type:"brief"},
+      {t:"Landed Cost Comparison",d:"Calculate total cost including freight, taxes, quality cost, payment terms impact",type:"calc"}
+    ];
+    if(toolId==="negotiation-brief")return[
+      {t:"Meeting Request Email",d:"Draft meeting request to supplier with agenda points",type:"email"},
+      {t:"Pre-Meeting Brief for Team",d:"One-pager for your negotiation team — key points, roles, red lines",type:"brief"},
+      {t:"Target Price Calculator",d:"Show detailed calculation behind your target price and concession range",type:"calc"},
+      {t:"Post-Negotiation Follow-up",d:"Draft follow-up email confirming agreed terms and next steps",type:"email"}
+    ];
+    if(toolId==="quote-analysis")return[
+      {t:"Counter-Quotation Email to Supplier",d:"Draft email challenging overpriced items with benchmark data and requesting revised quotation",type:"email"},
+      {t:"Quotation Comparison Brief for Management",d:"Executive summary of quotation analysis with recommendation — approve, negotiate, or reject",type:"brief"},
+      {t:"Should-Cost Breakdown Calculator",d:"Detailed cost buildup for key items — material + process + overhead + margin vs quoted price",type:"calc"},
+      {t:"Commercial Terms Correction Letter",d:"Draft letter requesting missing/corrected commercial terms before PO placement",type:"email"}
+    ];
+    if(toolId==="service-comparator")return[
+      {t:"Award Letter to L1 Vendor",d:"Draft professional award letter to recommended service vendor with scope, terms, and conditions",type:"email"},
+      {t:"Regret Letters to Non-Selected Vendors",d:"Draft professional regret letters to vendors not selected",type:"email"},
+      {t:"Management Approval Note",d:"Board-ready note with normalized comparison, L1 assessment, risk flags, and recommendation for approval",type:"brief"},
+      {t:"Negotiation Email to L1",d:"Draft email to L1 addressing scope gaps, compliance concerns, and counter-offer for better terms",type:"email"},
+      {t:"Scope Clarification RFI",d:"Draft Request for Information asking vendors to clarify scope gaps and ambiguities identified in analysis",type:"email"},
+      {t:"Statutory Compliance Checklist",d:"Generate compliance verification checklist — PF/ESI registration, CLRA license, min wages, insurance",type:"brief"}
+    ];
+    return[];
+  };
+
+  const getActionContext=(toolId,res,fd)=>{
+    if(toolId==="price-check")return `Price Check: Item=${fd.itemName||"N/A"}, Material=${fd.material||"N/A"}, Quoted=₹${fd.quotedPrice||"N/A"}, Fair Range=₹${res.fairRangeLow}-₹${res.fairRangeHigh}, Verdict=${res.verdict}, Deviation=${res.percentDeviation}%, Supplier=${fd.supplier||"N/A"}, Annual Qty=${fd.qty||"N/A"}`;
+    if(toolId==="contract-analyzer")return `Contract Analysis: ${res.contractSummary||""}. Risky clauses: ${res.risky?.length||0}, Missing: ${res.missing?.length||0}, Favorable: ${res.favorable?.length||0}. Overall risk: ${res.overallRisk}. Key risks: ${(res.risky||[]).map(r=>r.clause).join(", ")}. Missing: ${(res.missing||[]).map(m=>m.clause).join(", ")}`;
+    if(toolId==="rfq-comparator")return `RFQ Comparison: ${res.rfqSummary||""}. Item: ${res.itemDescription||"N/A"}. Vendors: ${(res.vendors||[]).map(v=>v.name+" ₹"+v.unitPrice+" (Score:"+v.overallScore+")").join(", ")}. Recommendation: ${res.recommendation||"N/A"}`;
+    if(toolId==="negotiation-brief")return `Negotiation Brief: Supplier=${fd.supplierName||"N/A"}, Category=${fd.category||"N/A"}, Annual Spend=₹${fd.annualSpend||"N/A"}, Context=${fd.issueContext||"N/A"}. Expected savings: ${res.expectedSavings||"N/A"}. Leverage: ${(res.leveragePoints||[]).map(l=>l.point).join(", ")}`;
+    if(toolId==="quote-analysis")return `Quotation Analysis: Supplier=${res.supplierName||"N/A"}, Total Quoted=₹${res.totalQuoted||"N/A"}, Fair Range=₹${res.totalFairLow}-₹${res.totalFairHigh}, Verdict=${res.overallVerdict}, Savings=${res.savingsPotential||"N/A"}. Overpriced items: ${(res.overpriceFlags||[]).map(f=>f.item).join(", ")}. Missing terms: ${(res.missingFromQuotation||[]).join(", ")}. Commercial gaps: ${(res.commercialGaps||[]).filter(g=>g.status!=="OK").map(g=>g.term).join(", ")}`;
+    if(toolId==="service-comparator")return `Service/AMC Comparison: ${res.serviceSummary||""}. Type: ${res.serviceType||"N/A"}. Period: ${res.contractPeriod||"N/A"}. Vendors: ${(res.vendors||[]).map(v=>v.name+" ₹"+v.normalizedTotal+" (Score:"+v.scorecard?.overallScore+", Rank:#"+v.rank+")").join(", ")}. L1: ${res.l1Assessment?.l1Vendor||"N/A"} ₹${res.l1Assessment?.l1Total||0}, L2: ${res.l1Assessment?.l2Vendor||"N/A"} ₹${res.l1Assessment?.l2Total||0}, Diff: ${res.l1Assessment?.priceDifference||"N/A"}. L1 Genuine: ${res.l1Assessment?.isL1Genuine}. Quality-Adjusted L1: ${res.l1Assessment?.qualityAdjustedL1||"N/A"}. Recommendation: ${res.l1Assessment?.recommendation||"N/A"}. Risks: ${(res.riskFlags||[]).join(", ")}. Expected savings: ${res.negotiationTips?.expectedSavings||"N/A"}`;
+    return JSON.stringify(res).slice(0,500);
+  };
+
+  // Smart Actions UI component
+  const SmartActionsPanel=()=>{
+    if(!result)return null;
+    const actions=getSmartActions(tool.id,result);
+    const context=getActionContext(tool.id,result,formData);
+    if(!actions.length)return null;
+    return(<div style={{marginTop:20}}>
+      <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:14,padding:18}}>
+        <div style={{fontSize:11,fontWeight:700,marginBottom:10,color:"var(--t3)",textTransform:"uppercase",letterSpacing:1}}>⚡ SMART ACTIONS — From Insight to Action</div>
+        <div style={{display:"grid",gap:8}}>
+          {actions.map((ac,i)=><div key={i} onClick={()=>!actLd&&runSmartAction(ac,context)} style={{background:"var(--bg)",border:"1px solid "+(actLd===ac.t?"var(--ac)":"var(--s2)"),borderRadius:10,padding:14,display:"flex",alignItems:"center",gap:12,cursor:actLd?"not-allowed":"pointer",opacity:actLd&&actLd!==ac.t?0.5:1,transition:"border-color .2s"}}>
+            <span style={{fontSize:18}}>{ac.type==="email"?"📧":ac.type==="brief"?"📋":ac.type==="calc"?"💰":"🔔"}</span>
+            <div style={{flex:1}}><div style={{fontSize:13,fontWeight:600,color:"var(--t1)"}}>{ac.t}</div><div style={{fontSize:11,color:"var(--t3)"}}>{ac.d}</div></div>
+            {actLd===ac.t?<div style={{width:16,height:16,border:"2px solid var(--ac)",borderTopColor:"transparent",borderRadius:"50%",animation:"saSpin 1s linear infinite"}}/>:<span style={{fontSize:10,padding:"4px 10px",borderRadius:8,background:"rgba(45,127,249,.15)",color:"var(--ac)",fontWeight:700}}>Run →</span>}
+          </div>)}
+        </div>
+      </div>
+      {actRes&&<div style={{marginTop:12,background:actRes.type==="error"?"rgba(239,68,68,.05)":"rgba(45,127,249,.05)",border:"1px solid "+(actRes.type==="error"?"rgba(239,68,68,.2)":"rgba(45,127,249,.2)"),borderRadius:14,padding:18}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+          <div style={{fontSize:13,fontWeight:700,color:actRes.type==="error"?"var(--err)":"var(--ac)"}}>{actRes.title}</div>
+          <div style={{display:"flex",gap:6}}>
+            <button onClick={()=>navigator.clipboard.writeText(actRes.content)} style={{fontSize:10,padding:"4px 10px",borderRadius:6,border:"1px solid var(--s3)",background:"var(--s2)",color:"var(--t2)",cursor:"pointer"}}>📋 Copy</button>
+            <button onClick={()=>setActRes(null)} style={{fontSize:10,padding:"4px 10px",borderRadius:6,border:"1px solid var(--s3)",background:"var(--s2)",color:"var(--t2)",cursor:"pointer"}}>✕ Close</button>
+          </div>
+        </div>
+        <div style={{fontSize:13,color:"var(--t1)",lineHeight:1.9,whiteSpace:"pre-wrap",fontFamily:actRes.type==="calc"?"monospace":"inherit"}}>{actRes.content}</div>
+      </div>}
+      <style>{"@keyframes saSpin{to{transform:rotate(360deg)}}"}</style>
+    </div>);
+  };
+
+  const runAI=async()=>{
+    if(tool.inputType==="form"){const missing=tool.fields.filter(f=>!formData[f.k]?.toString().trim());if(missing.length>0){setErr("Please fill: "+missing.map(f=>f.l).join(", "));return}}
+    if(tool.inputType==="file"&&files.length===0){setErr("Please upload at least one file");return}
+    if(credits<=0){setErr("No AI credits. Upgrade to Professional.");return}
+    setLoading(true);setErr(null);
+    try{
+      const prompt=tool.prompt(tool.inputType==="form"?formData:notes);
+      let res;
+      if(tool.inputType==="file"){res=await callAI(files,prompt,notes)}
+      else{
+        let r=await apiFetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:API_HEADERS,body:JSON.stringify({model:"claude-opus-4-6",max_tokens:8192,temperature:0,messages:[{role:"user",content:prompt+"\nAdditional notes: "+(notes||"None")}]})});
+        if(!r.ok)r=await apiFetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:API_HEADERS,body:JSON.stringify({model:"claude-sonnet-4-5-20250929",max_tokens:8192,temperature:0,messages:[{role:"user",content:prompt+"\nAdditional notes: "+(notes||"None")}]})});
+        if(!r.ok)throw new Error("API "+r.status);const d=await r.json();const txt=stripCites(d.content?.map(c=>c.text||"").join("")||"");
+        const i1=txt.indexOf("{"),i2=txt.lastIndexOf("}");if(i1===-1||i2<=i1)throw new Error("No JSON");res=repairJSON(txt);
+      }
+      setResult(res);useCredit();
+    }catch(e){setErr("AI analysis failed: "+e.message)}
+    setLoading(false);
+  };
+
+  // ─── RESULT RENDERERS ───
+  const verdictColor=v=>v==="HIGH"?"var(--err)":v==="LOW"?"var(--warn)":v==="FAIR"||v==="COMPETITIVE"?"var(--ok)":"var(--t2)";
+  const sevColor=s=>s==="High"||s==="Critical"?"var(--err)":s==="Medium"||s==="Important"?"var(--warn)":"var(--ok)";
+
+  const renderPriceCheck=r=>(<div>
+    <div style={{textAlign:"center",padding:20,background:verdictColor(r.verdict)+"15",border:"2px solid "+verdictColor(r.verdict),borderRadius:14,marginBottom:16}}>
+      <div style={{fontSize:36,fontWeight:800,color:verdictColor(r.verdict)}}>{r.verdict}</div>
+      <div style={{fontSize:13,color:"var(--t2)",marginTop:4}}>Confidence: {r.confidence}</div>
+      <div style={{display:"flex",justifyContent:"center",gap:30,marginTop:12}}>
+        <div><div style={{fontSize:10,color:"var(--t3)"}}>Quoted</div><div style={{fontFamily:"IBM Plex Mono",fontSize:20,fontWeight:700,color:r.verdict==="HIGH"?"var(--err)":"var(--t1)",textDecoration:r.verdict==="HIGH"?"line-through":"none"}}>₹{r.quotedPrice}</div></div>
+        <div><div style={{fontSize:10,color:"var(--t3)"}}>Fair Range</div><div style={{fontFamily:"IBM Plex Mono",fontSize:20,fontWeight:700,color:"var(--ok)"}}>₹{r.fairRangeLow}–₹{r.fairRangeHigh}</div></div>
+        <div><div style={{fontSize:10,color:"var(--t3)"}}>Deviation</div><div style={{fontFamily:"IBM Plex Mono",fontSize:20,fontWeight:700,color:verdictColor(r.verdict)}}>{r.percentDeviation>0?"+":""}{r.percentDeviation}%</div></div>
+      </div>
+    </div>
+    {r.costBreakdown?.length>0&&<div style={{marginBottom:16}}><div style={{fontSize:13,fontWeight:700,marginBottom:8}}>Should-Cost Breakdown</div>
+      {r.costBreakdown.map((c,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"4px 0"}}><div style={{flex:1,fontSize:12,color:"var(--t2)"}}>{c.component}</div><div style={{width:200,height:8,background:"var(--s2)",borderRadius:4,overflow:"hidden"}}><div style={{width:c.pct+"%",height:"100%",background:"var(--ac)",borderRadius:4}}/></div><div style={{fontFamily:"IBM Plex Mono",fontSize:11,width:60,textAlign:"right"}}>₹{c.estimated}</div><div style={{fontFamily:"IBM Plex Mono",fontSize:10,color:"var(--t3)",width:40,textAlign:"right"}}>{c.pct}%</div></div>)}</div>}
+    {r.negotiationLeverage?.length>0&&<div style={{marginBottom:16}}><div style={{fontSize:13,fontWeight:700,marginBottom:8}}>💪 Negotiation Leverage</div>
+      {r.negotiationLeverage.map((p,i)=><div key={i} style={{display:"flex",gap:8,padding:"6px 0",borderBottom:"1px solid var(--s2)"}}><span style={{color:"var(--ac)",fontWeight:700,fontSize:12}}>#{i+1}</span><span style={{fontSize:12,color:"var(--t2)"}}>{p}</span></div>)}</div>}
+    <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:14}}><div style={{fontSize:12,fontWeight:700,marginBottom:4}}>🎯 Recommended Action</div><div style={{fontSize:12,color:"var(--t2)",lineHeight:1.7}}>{r.recommendedAction}</div>
+      {r.savingsIfNegotiated>0&&<div style={{marginTop:8,fontFamily:"IBM Plex Mono",fontSize:14,fontWeight:700,color:"var(--ok)"}}>Potential Savings: ₹{r.savingsIfNegotiated.toLocaleString("en-IN")}</div>}</div>
+  </div>);
+
+  const renderContract=r=>(<div>
+    <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:14,marginBottom:16}}>
+      <div style={{fontSize:13,fontWeight:700,marginBottom:6}}>Contract Summary</div><div style={{fontSize:12,color:"var(--t2)",lineHeight:1.7}}>{r.contractSummary}</div>
+      {r.parties&&<div style={{display:"flex",gap:16,marginTop:8,flexWrap:"wrap",fontSize:11,color:"var(--t3)"}}><span>Buyer: <strong style={{color:"var(--t1)"}}>{r.parties.buyer}</strong></span><span>Supplier: <strong style={{color:"var(--t1)"}}>{r.parties.supplier}</strong></span><span>Tenure: {r.parties.tenure}</span></div>}
+    </div>
+    <div style={{display:"flex",gap:12,marginBottom:16,textAlign:"center"}}>
+      <div style={{flex:1,padding:12,borderRadius:8,background:"rgba(16,185,129,.06)",border:"1px solid rgba(16,185,129,.2)"}}><div style={{fontSize:22,fontWeight:700,color:"var(--ok)"}}>{r.favorable?.length||0}</div><div style={{fontSize:10,color:"var(--t3)"}}>Favorable</div></div>
+      <div style={{flex:1,padding:12,borderRadius:8,background:"rgba(244,63,94,.06)",border:"1px solid rgba(244,63,94,.2)"}}><div style={{fontSize:22,fontWeight:700,color:"var(--err)"}}>{r.risky?.length||0}</div><div style={{fontSize:10,color:"var(--t3)"}}>Risky</div></div>
+      <div style={{flex:1,padding:12,borderRadius:8,background:"rgba(245,158,11,.06)",border:"1px solid rgba(245,158,11,.2)"}}><div style={{fontSize:22,fontWeight:700,color:"var(--warn)"}}>{r.missing?.length||0}</div><div style={{fontSize:10,color:"var(--t3)"}}>Missing</div></div>
+      <div style={{flex:1,padding:12,borderRadius:8,background:r.overallRisk==="High"?"rgba(244,63,94,.06)":"rgba(245,158,11,.06)",border:"1px solid "+(r.overallRisk==="High"?"rgba(244,63,94,.2)":"rgba(245,158,11,.2)")}}><div style={{fontSize:14,fontWeight:700,color:sevColor(r.overallRisk)}}>{r.overallRisk}</div><div style={{fontSize:10,color:"var(--t3)"}}>Overall Risk</div></div>
+    </div>
+    {r.risky?.length>0&&<div style={{marginBottom:16}}><div style={{fontSize:13,fontWeight:700,color:"var(--err)",marginBottom:8}}>🚩 Risky Clauses</div>
+      {r.risky.map((c,i)=><div key={i} style={{background:"rgba(244,63,94,.04)",border:"1px solid rgba(244,63,94,.12)",borderRadius:8,padding:10,marginBottom:6}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{fontSize:12,fontWeight:600}}>{c.clause}</span><span className="rpt-sev" style={{background:sevColor(c.severity)+"18",color:sevColor(c.severity)}}>{c.severity}</span></div><div style={{fontSize:11,color:"var(--t2)",marginBottom:3}}>{c.risk}</div><div style={{fontSize:10,color:"var(--ok)"}}>→ {c.recommendation}</div></div>)}</div>}
+    {r.missing?.length>0&&<div style={{marginBottom:16}}><div style={{fontSize:13,fontWeight:700,color:"var(--warn)",marginBottom:8}}>⚠️ Missing Clauses</div>
+      {r.missing.map((c,i)=><div key={i} style={{background:"rgba(245,158,11,.04)",border:"1px solid rgba(245,158,11,.12)",borderRadius:8,padding:10,marginBottom:6}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{fontSize:12,fontWeight:600}}>{c.clause}</span><span className="rpt-sev" style={{background:sevColor(c.importance)+"18",color:sevColor(c.importance)}}>{c.importance}</span></div><div style={{fontSize:11,color:"var(--t2)",marginBottom:3}}>{c.recommendation}</div><div style={{fontSize:10,color:"var(--t3)"}}>Risk if missing: {c.risk}</div></div>)}</div>}
+    {r.favorable?.length>0&&<div style={{marginBottom:16}}><div style={{fontSize:13,fontWeight:700,color:"var(--ok)",marginBottom:8}}>✅ Favorable Clauses</div>
+      {r.favorable.map((c,i)=><div key={i} style={{display:"flex",gap:8,padding:"6px 0",borderBottom:"1px solid var(--s2)"}}><span style={{color:"var(--ok)"}}>✓</span><span style={{fontSize:12,color:"var(--t2)"}}><strong>{c.clause}</strong> — {c.detail}</span></div>)}</div>}
+    {r.topActions?.length>0&&<div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:14}}><div style={{fontSize:12,fontWeight:700,marginBottom:6}}>🎯 Top Actions Before Signing</div>{r.topActions.map((a,i)=><div key={i} style={{fontSize:11,color:"var(--t2)",padding:"3px 0"}}>{i+1}. {a}</div>)}</div>}
+  </div>);
+
+  const renderRFQ=r=>(<div>
+    <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:14,marginBottom:16}}>
+      <div style={{fontSize:13,fontWeight:700,marginBottom:4}}>{r.itemDescription||"RFQ Comparison"}</div><div style={{fontSize:12,color:"var(--t2)",lineHeight:1.7}}>{r.rfqSummary}</div></div>
+    {r.vendors?.length>0&&<div style={{marginBottom:16}}><div style={{fontSize:13,fontWeight:700,marginBottom:10}}>Vendor Rankings</div>
+      {r.vendors.sort((a,b)=>a.rank-b.rank).map((v,i)=><div key={i} style={{background:i===0?"rgba(16,185,129,.04)":"var(--s1)",border:"1px solid "+(i===0?"rgba(16,185,129,.3)":"var(--s2)"),borderRadius:10,padding:14,marginBottom:8,position:"relative"}}>
+        {i===0&&<div style={{position:"absolute",top:8,right:10,fontSize:9,fontWeight:700,color:"#fff",background:"var(--ok)",padding:"2px 8px",borderRadius:6}}>RECOMMENDED</div>}
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+          <div><span style={{fontSize:15,fontWeight:700}}>#{v.rank} {v.name}</span><span style={{fontSize:11,color:"var(--t3)",marginLeft:8}}>{v.location}</span></div>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:18,fontWeight:700,color:i===0?"var(--ok)":"var(--t1)"}}>₹{v.unitPrice?.toLocaleString("en-IN")}</div>
+        </div>
+        <div style={{display:"flex",gap:12,marginBottom:6,fontSize:11,color:"var(--t2)"}}>
+          <span>Delivery: {v.deliveryDays} days</span><span>MOQ: {v.moq}</span><span>Payment: {v.paymentTerms}</span><span>Warranty: {v.warranty}</span>
+        </div>
+        <div style={{display:"flex",gap:8,marginBottom:6}}>
+          <div style={{flex:1}}><div style={{fontSize:9,color:"var(--t3)",marginBottom:2}}>Technical</div><div style={{height:6,background:"var(--s2)",borderRadius:3}}><div style={{width:v.technicalScore+"%",height:"100%",background:"var(--ac)",borderRadius:3}}/></div><div style={{fontSize:10,fontFamily:"IBM Plex Mono",marginTop:2}}>{v.technicalScore}/100</div></div>
+          <div style={{flex:1}}><div style={{fontSize:9,color:"var(--t3)",marginBottom:2}}>Commercial</div><div style={{height:6,background:"var(--s2)",borderRadius:3}}><div style={{width:v.commercialScore+"%",height:"100%",background:"var(--ok)",borderRadius:3}}/></div><div style={{fontSize:10,fontFamily:"IBM Plex Mono",marginTop:2}}>{v.commercialScore}/100</div></div>
+          <div style={{flex:1}}><div style={{fontSize:9,color:"var(--t3)",marginBottom:2}}>Overall</div><div style={{height:6,background:"var(--s2)",borderRadius:3}}><div style={{width:v.overallScore+"%",height:"100%",background:i===0?"var(--ok)":"var(--warn)",borderRadius:3}}/></div><div style={{fontSize:10,fontFamily:"IBM Plex Mono",marginTop:2}}>{v.overallScore}/100</div></div>
+        </div>
+        <div style={{display:"flex",gap:16,fontSize:10}}>
+          <div style={{color:"var(--ok)"}}>{v.strengths?.map((s,j)=><span key={j}>✓ {s} </span>)}</div>
+          <div style={{color:"var(--warn)"}}>{v.weaknesses?.map((w,j)=><span key={j}>⚠ {w} </span>)}</div>
+        </div>
+      </div>)}</div>}
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
+      <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:14}}><div style={{fontSize:12,fontWeight:700,marginBottom:4}}>🎯 Recommendation</div><div style={{fontSize:11,color:"var(--t2)",lineHeight:1.7}}>{r.recommendation}</div></div>
+      <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:14}}><div style={{fontSize:12,fontWeight:700,marginBottom:4}}>💰 Negotiation Strategy</div><div style={{fontSize:11,color:"var(--t2)",lineHeight:1.7}}>{r.negotiationStrategy}</div>{r.savingsPotential&&<div style={{marginTop:6,fontFamily:"IBM Plex Mono",fontSize:13,fontWeight:700,color:"var(--ok)"}}>{r.savingsPotential}</div>}</div>
+    </div>
+    {r.redFlags?.length>0&&<div style={{background:"rgba(244,63,94,.04)",border:"1px solid rgba(244,63,94,.12)",borderRadius:8,padding:10}}><div style={{fontSize:12,fontWeight:700,color:"var(--err)",marginBottom:4}}>🚩 Red Flags</div>{r.redFlags.map((f,i)=><div key={i} style={{fontSize:11,color:"var(--t2)",padding:"2px 0"}}>• {f}</div>)}</div>}
+  </div>);
+
+  const renderNegotiation=r=>(<div>
+    <div style={{background:"linear-gradient(135deg,rgba(245,158,11,.05),rgba(16,185,129,.05))",border:"1px solid rgba(245,158,11,.2)",borderRadius:14,padding:20,marginBottom:16,textAlign:"center"}}>
+      <div style={{fontSize:16,fontWeight:800}}>{r.briefTitle}</div>
+      <div style={{fontSize:12,color:"var(--t2)",marginTop:6,lineHeight:1.7}}>{r.situationAssessment}</div>
+      {r.expectedSavings&&<div style={{marginTop:10,fontFamily:"IBM Plex Mono",fontSize:16,fontWeight:700,color:"var(--ok)"}}>{r.expectedSavings}</div>}
+    </div>
+    {r.leveragePoints?.length>0&&<div style={{marginBottom:16}}><div style={{fontSize:13,fontWeight:700,marginBottom:8}}>💪 Leverage Points</div>
+      {r.leveragePoints.map((p,i)=><div key={i} style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:8,padding:10,marginBottom:6}}>
+        <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}><span style={{fontSize:12,fontWeight:600}}>{p.point}</span><span style={{fontSize:9,padding:"2px 8px",borderRadius:6,fontWeight:700,background:p.strength==="Strong"?"rgba(16,185,129,.1)":"rgba(245,158,11,.1)",color:p.strength==="Strong"?"var(--ok)":"var(--warn)"}}>{p.strength}</span></div>
+        <div style={{fontSize:11,color:"var(--t2)"}}>{p.howToUse}</div></div>)}</div>}
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:16}}>
+      <div style={{background:"rgba(16,185,129,.04)",border:"1px solid rgba(16,185,129,.15)",borderRadius:8,padding:10}}><div style={{fontSize:10,fontWeight:700,color:"var(--ok)",marginBottom:4}}>🎯 Opening Position</div><div style={{fontSize:11,color:"var(--t2)",lineHeight:1.6}}>{r.openingPosition}</div></div>
+      <div style={{background:"rgba(59,130,246,.04)",border:"1px solid rgba(59,130,246,.15)",borderRadius:8,padding:10}}><div style={{fontSize:10,fontWeight:700,color:"var(--ac)",marginBottom:4}}>✅ Target Outcome</div><div style={{fontSize:11,color:"var(--t2)",lineHeight:1.6}}>{r.targetOutcome}</div></div>
+      <div style={{background:"rgba(244,63,94,.04)",border:"1px solid rgba(244,63,94,.15)",borderRadius:8,padding:10}}><div style={{fontSize:10,fontWeight:700,color:"var(--err)",marginBottom:4}}>🚫 Walk-Away</div><div style={{fontSize:11,color:"var(--t2)",lineHeight:1.6}}>{r.walkAwayPoint}</div></div>
+    </div>
+    {r.concessionPlan?.length>0&&<div style={{marginBottom:16}}><div style={{fontSize:13,fontWeight:700,marginBottom:8}}>🔄 Concession Plan</div>
+      {r.concessionPlan.sort((a,b)=>a.sequence-b.sequence).map((c,i)=><div key={i} style={{display:"flex",gap:10,padding:"6px 0",borderBottom:"1px solid var(--s2)",alignItems:"center"}}><span style={{fontSize:11,fontFamily:"IBM Plex Mono",color:"var(--ac)",fontWeight:700,width:20}}>#{c.sequence}</span><div style={{flex:1,fontSize:11}}><span style={{color:"var(--warn)"}}>Give:</span> <span style={{color:"var(--t2)"}}>{c.give}</span></div><span style={{fontSize:14,color:"var(--t3)"}}>→</span><div style={{flex:1,fontSize:11}}><span style={{color:"var(--ok)"}}>Get:</span> <span style={{color:"var(--t2)"}}>{c.get}</span></div></div>)}</div>}
+    {r.talkingPoints?.length>0&&<div style={{marginBottom:16}}><div style={{fontSize:13,fontWeight:700,marginBottom:8}}>🗣️ Talking Points</div>
+      {r.talkingPoints.map((t,i)=><div key={i} style={{fontSize:11,color:"var(--t2)",padding:"4px 0",paddingLeft:16,position:"relative"}}><span style={{position:"absolute",left:0,color:"var(--ac)"}}>•</span>{t}</div>)}</div>}
+    {r.counterArguments?.length>0&&<div style={{marginBottom:16}}><div style={{fontSize:13,fontWeight:700,marginBottom:8}}>🛡️ Counter-Arguments</div>
+      {r.counterArguments.map((c,i)=><div key={i} style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:8,padding:10,marginBottom:6}}>
+        <div style={{fontSize:11,color:"var(--err)",marginBottom:3}}>They'll say: "{c.theyWillSay}"</div>
+        <div style={{fontSize:11,color:"var(--ok)"}}>You respond: "{c.youRespond}"</div></div>)}</div>}
+    {r.redLines?.length>0&&<div style={{marginBottom:16}}><div style={{fontSize:13,fontWeight:700,color:"var(--err)",marginBottom:8}}>🚫 Red Lines — Do NOT Concede</div>
+      {r.redLines.map((l,i)=><div key={i} style={{fontSize:11,color:"var(--t2)",padding:"3px 0"}}>✗ {l}</div>)}</div>}
+    {r.meetingScript&&<div style={{background:"rgba(59,130,246,.04)",border:"1px solid rgba(59,130,246,.15)",borderRadius:10,padding:14,marginBottom:16}}><div style={{fontSize:12,fontWeight:700,color:"var(--ac)",marginBottom:6}}>📝 Meeting Opening Script</div><div style={{fontSize:12,color:"var(--t2)",lineHeight:1.8,fontStyle:"italic"}}>"{r.meetingScript}"</div></div>}
+    {r.planB&&<div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:14}}><div style={{fontSize:12,fontWeight:700,marginBottom:4}}>🔀 Plan B</div><div style={{fontSize:11,color:"var(--t2)",lineHeight:1.7}}>{r.planB}</div>{r.timeline&&<div style={{fontSize:10,color:"var(--t3)",marginTop:6}}>Timeline: {r.timeline}</div>}</div>}
+  </div>);
+
+  const renderQuoteAnalysis=r=>(<div>
+    <div style={{textAlign:"center",padding:20,background:r.overallVerdict==="OVERPRICED"?"rgba(239,68,68,.06)":r.overallVerdict==="COMPETITIVE"?"rgba(16,185,129,.06)":"rgba(245,158,11,.06)",border:"2px solid "+(r.overallVerdict==="OVERPRICED"?"rgba(239,68,68,.3)":r.overallVerdict==="COMPETITIVE"?"rgba(16,185,129,.3)":"rgba(245,158,11,.3)"),borderRadius:14,marginBottom:16}}>
+      <div style={{fontSize:28,fontWeight:800,color:r.overallVerdict==="OVERPRICED"?"var(--err)":r.overallVerdict==="COMPETITIVE"?"var(--ok)":"var(--warn)"}}>{r.overallVerdict}</div>
+      <div style={{fontSize:12,color:"var(--t2)",marginTop:4}}>{r.supplierName} • {r.quotationDate||"N/A"} • Valid: {r.quotationValidity||"N/A"}</div>
+      <div style={{display:"flex",justifyContent:"center",gap:30,marginTop:12}}>
+        <div><div style={{fontSize:10,color:"var(--t3)"}}>Quoted Total</div><div style={{fontFamily:"IBM Plex Mono",fontSize:18,fontWeight:700,color:r.overallVerdict==="OVERPRICED"?"var(--err)":"var(--t1)"}}>₹{(r.totalQuoted||0).toLocaleString("en-IN")}</div></div>
+        <div><div style={{fontSize:10,color:"var(--t3)"}}>Fair Range</div><div style={{fontFamily:"IBM Plex Mono",fontSize:18,fontWeight:700,color:"var(--ok)"}}>₹{(r.totalFairLow||0).toLocaleString("en-IN")}–₹{(r.totalFairHigh||0).toLocaleString("en-IN")}</div></div>
+        <div><div style={{fontSize:10,color:"var(--t3)"}}>Savings Potential</div><div style={{fontFamily:"IBM Plex Mono",fontSize:18,fontWeight:700,color:"var(--ac)"}}>{r.savingsPotential}</div></div>
+      </div>
+    </div>
+    <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:14,marginBottom:16}}>
+      <div style={{fontSize:12,color:"var(--t2)",lineHeight:1.7}}>{r.quotationSummary}</div>
+    </div>
+    {r.lineItems?.length>0&&<div style={{marginBottom:16}}><div style={{fontSize:13,fontWeight:700,marginBottom:8}}>📋 Line Item Analysis</div>
+      <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+        <thead><tr style={{background:"var(--s2)"}}>{["#","Item","Qty","Quoted ₹","Fair Range ₹","Verdict","Remarks"].map((h,i)=><th key={i} style={{padding:"6px 8px",textAlign:"left",fontWeight:600,color:"var(--t2)",borderBottom:"1px solid var(--s3)",fontSize:10}}>{h}</th>)}</tr></thead>
+        <tbody>{r.lineItems.map((li,i)=><tr key={i} style={{borderBottom:"1px solid var(--s2)"}}>
+          <td style={{padding:"6px 8px",fontFamily:"IBM Plex Mono",fontSize:10}}>{li.sno}</td>
+          <td style={{padding:"6px 8px",fontWeight:500,maxWidth:180}}>{li.item}</td>
+          <td style={{padding:"6px 8px",fontFamily:"IBM Plex Mono"}}>{li.quotedQty} {li.uom}</td>
+          <td style={{padding:"6px 8px",fontFamily:"IBM Plex Mono",fontWeight:600,color:li.verdict==="HIGH"?"var(--err)":"var(--t1)"}}>₹{li.quotedUnitPrice?.toLocaleString("en-IN")}</td>
+          <td style={{padding:"6px 8px",fontFamily:"IBM Plex Mono",color:"var(--ok)"}}>₹{li.fairPriceLow?.toLocaleString("en-IN")}–₹{li.fairPriceHigh?.toLocaleString("en-IN")}</td>
+          <td style={{padding:"6px 8px"}}><span style={{fontSize:9,padding:"2px 8px",borderRadius:4,fontWeight:700,color:"#fff",background:li.verdict==="HIGH"?"var(--err)":li.verdict==="LOW"?"var(--warn)":"var(--ok)"}}>{li.verdict}</span></td>
+          <td style={{padding:"6px 8px",fontSize:10,color:"var(--t3)",maxWidth:200}}>{li.remarks}</td>
+        </tr>)}</tbody>
+      </table></div>
+    </div>}
+    {r.costBreakdownEstimate?.length>0&&<div style={{marginBottom:16}}><div style={{fontSize:13,fontWeight:700,marginBottom:8}}>📊 Estimated Cost Structure</div>
+      {r.costBreakdownEstimate.map((c,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"3px 0"}}><div style={{flex:1,fontSize:12,color:"var(--t2)"}}>{c.component}</div><div style={{width:200,height:8,background:"var(--s2)",borderRadius:4,overflow:"hidden"}}><div style={{width:c.pct+"%",height:"100%",background:["#2d7ff9","#10b981","#f59e0b","#f43f5e","#a78bfa"][i%5],borderRadius:4}}/></div><div style={{fontFamily:"IBM Plex Mono",fontSize:10,width:40,textAlign:"right"}}>{c.pct}%</div></div>)}</div>}
+    {r.overpriceFlags?.length>0&&<div style={{marginBottom:16}}><div style={{fontSize:13,fontWeight:700,color:"var(--err)",marginBottom:8}}>🚩 Overpriced Items</div>
+      {r.overpriceFlags.map((f,i)=><div key={i} style={{background:"rgba(244,63,94,.04)",border:"1px solid rgba(244,63,94,.12)",borderRadius:8,padding:10,marginBottom:6}}>
+        <div style={{fontSize:12,fontWeight:600,marginBottom:3}}>{f.item}</div>
+        <div style={{fontSize:11,color:"var(--t2)",marginBottom:3}}>{f.issue}</div>
+        <div style={{fontSize:10,color:"var(--ok)"}}>→ {f.suggestedAction}</div></div>)}</div>}
+    {r.commercialGaps?.length>0&&<div style={{marginBottom:16}}><div style={{fontSize:13,fontWeight:700,color:"var(--warn)",marginBottom:8}}>⚠️ Commercial Term Gaps</div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:6}}>
+      {r.commercialGaps.map((g,i)=><div key={i} style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:8,padding:10}}>
+        <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}><span style={{fontSize:11,fontWeight:600}}>{g.term}</span><span style={{fontSize:9,padding:"2px 6px",borderRadius:4,fontWeight:700,color:"#fff",background:g.status==="Missing"?"var(--err)":g.status==="Unfavorable"?"var(--warn)":"var(--ok)"}}>{g.status}</span></div>
+        <div style={{fontSize:10,color:"var(--t2)"}}>{g.recommendation}</div></div>)}</div>
+    </div>}
+    {r.missingFromQuotation?.length>0&&<div style={{marginBottom:16}}><div style={{fontSize:13,fontWeight:700,marginBottom:8}}>❓ Missing from Quotation</div>
+      {r.missingFromQuotation.map((m,i)=><div key={i} style={{fontSize:11,color:"var(--t2)",padding:"3px 0"}}>• {m}</div>)}</div>}
+    {r.specComplianceNotes?.length>0&&r.specComplianceNotes[0]&&<div style={{marginBottom:16}}><div style={{fontSize:13,fontWeight:700,marginBottom:8}}>📐 Spec/Drawing Compliance</div>
+      {r.specComplianceNotes.map((n,i)=><div key={i} style={{fontSize:11,color:"var(--t2)",padding:"3px 0"}}>• {n}</div>)}</div>}
+    {r.negotiationStrategy&&<div style={{background:"rgba(59,130,246,.04)",border:"1px solid rgba(59,130,246,.15)",borderRadius:14,padding:18,marginBottom:16}}>
+      <div style={{fontSize:13,fontWeight:700,color:"var(--ac)",marginBottom:8}}>🎯 Negotiation Strategy</div>
+      <div style={{fontSize:12,color:"var(--t2)",lineHeight:1.7,marginBottom:10,fontStyle:"italic"}}>"{r.negotiationStrategy.openingStatement}"</div>
+      {r.negotiationStrategy.topLeveragePoints?.length>0&&<div style={{marginBottom:8}}><div style={{fontSize:11,fontWeight:600,marginBottom:4}}>💪 Top Leverage Points:</div>
+        {r.negotiationStrategy.topLeveragePoints.map((p,i)=><div key={i} style={{fontSize:11,color:"var(--t2)",padding:"2px 0",paddingLeft:14,position:"relative"}}><span style={{position:"absolute",left:0,color:"var(--ac)"}}>•</span>{p}</div>)}</div>}
+      {r.negotiationStrategy.itemsToChallenge?.length>0&&<div style={{marginBottom:8}}><div style={{fontSize:11,fontWeight:600,marginBottom:4}}>🔍 Items to Challenge:</div>
+        {r.negotiationStrategy.itemsToChallenge.map((p,i)=><div key={i} style={{fontSize:11,color:"var(--t2)",padding:"2px 0",paddingLeft:14,position:"relative"}}><span style={{position:"absolute",left:0,color:"var(--err)"}}>→</span>{p}</div>)}</div>}
+      {r.negotiationStrategy.concessions&&<div><div style={{fontSize:11,fontWeight:600,marginBottom:4}}>🤝 What You Can Offer:</div><div style={{fontSize:11,color:"var(--t2)"}}>{r.negotiationStrategy.concessions}</div></div>}
+    </div>}
+    {r.riskFlags?.length>0&&<div style={{marginBottom:16}}><div style={{fontSize:13,fontWeight:700,marginBottom:8}}>⚡ Risk Flags</div>
+      {r.riskFlags.map((f,i)=><div key={i} style={{fontSize:11,color:"var(--warn)",padding:"3px 0"}}>⚠ {f}</div>)}</div>}
+    {r.recommendedNextSteps?.length>0&&<div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:14}}><div style={{fontSize:12,fontWeight:700,marginBottom:6}}>📌 Recommended Next Steps</div>
+      {r.recommendedNextSteps.map((s,i)=><div key={i} style={{fontSize:11,color:"var(--t2)",padding:"3px 0"}}>{i+1}. {s}</div>)}</div>}
+  </div>);
+
+  const renderServiceComparator=r=>{
+    const vNames=(r.vendors||[]).map(v=>v.name);
+    const compCols=vNames.length>=3?["vendor1","vendor2","vendor3"]:vNames.length===2?["vendor1","vendor2"]:["vendor1"];
+    return(<div>
+    {/* Summary Header */}
+    <div style={{background:"linear-gradient(135deg,rgba(124,58,237,.06),rgba(37,99,235,.06))",border:"1px solid rgba(124,58,237,.2)",borderRadius:14,padding:20,marginBottom:16}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8,flexWrap:"wrap",gap:8}}>
+        <div><div style={{fontSize:9,fontWeight:700,color:"#7c3aed",textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>{r.serviceType||"Service"} Comparison</div>
+          <div style={{fontSize:16,fontWeight:800}}>{r.serviceSummary}</div></div>
+        {r.contractPeriod&&<div style={{background:"rgba(124,58,237,.1)",padding:"6px 14px",borderRadius:8,fontSize:11,fontWeight:700,color:"#7c3aed"}}>📅 {r.contractPeriod}</div>}
+      </div>
+      {r.rfpScope?.length>0&&<div style={{marginTop:8}}><div style={{fontSize:10,fontWeight:700,color:"var(--t3)",marginBottom:4}}>RFP SCOPE</div>
+        <div style={{display:"flex",flexWrap:"wrap",gap:4}}>{r.rfpScope.map((s,i)=><span key={i} style={{fontSize:10,padding:"3px 10px",borderRadius:6,background:"rgba(124,58,237,.08)",color:"var(--t2)",border:"1px solid rgba(124,58,237,.12)"}}>{s}</span>)}</div></div>}
+    </div>
+
+    {/* Vendor Rankings */}
+    {r.vendors?.length>0&&<div style={{marginBottom:16}}><div style={{fontSize:14,fontWeight:700,marginBottom:10}}>🏆 Vendor Rankings</div>
+      {r.vendors.sort((a,b)=>(a.rank||99)-(b.rank||99)).map((v,i)=>{
+        const isL1=v.name===r.l1Assessment?.l1Vendor;
+        const isQualL1=v.name===r.l1Assessment?.qualityAdjustedL1;
+        return(<div key={i} style={{background:isQualL1?"rgba(16,185,129,.04)":isL1?"rgba(245,158,11,.04)":"var(--s1)",border:"1px solid "+(isQualL1?"rgba(16,185,129,.3)":isL1?"rgba(245,158,11,.3)":"var(--s2)"),borderRadius:12,padding:16,marginBottom:10,position:"relative"}}>
+          <div style={{position:"absolute",top:10,right:10,display:"flex",gap:4}}>
+            {isL1&&<span style={{fontSize:9,fontWeight:700,color:"#fff",background:"var(--warn)",padding:"2px 8px",borderRadius:6}}>L1 — LOWEST</span>}
+            {isQualL1&&<span style={{fontSize:9,fontWeight:700,color:"#fff",background:"var(--ok)",padding:"2px 8px",borderRadius:6}}>✓ RECOMMENDED</span>}
+          </div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,flexWrap:"wrap",gap:8}}>
+            <div><span style={{fontSize:16,fontWeight:800}}>#{v.rank} {v.name}</span></div>
+            <div style={{textAlign:"right"}}><div style={{fontFamily:"IBM Plex Mono",fontSize:20,fontWeight:800,color:isL1?"var(--warn)":"var(--t1)"}}>₹{(v.normalizedTotal||v.quotedTotal||0).toLocaleString("en-IN")}</div>
+              <div style={{fontSize:9,color:"var(--t3)"}}>{v.period||"annual"} (normalized)</div></div>
+          </div>
+          {/* Scorecard bars */}
+          {v.scorecard&&<div style={{display:"flex",gap:10,marginBottom:10}}>
+            {[{l:"Scope",v:v.scorecard.scopeCoverage,c:"#7c3aed"},{l:"Commercial",v:v.scorecard.commercialScore,c:"#2563eb"},{l:"Compliance",v:v.scorecard.complianceScore,c:v.scorecard.complianceScore<60?"var(--err)":"#10b981"},{l:"Overall",v:v.scorecard.overallScore,c:v.scorecard.overallScore>=70?"#10b981":"var(--warn)"}].map((s,j)=>
+              <div key={j} style={{flex:1}}><div style={{fontSize:9,color:"var(--t3)",marginBottom:2}}>{s.l}</div><div style={{height:6,background:"var(--s2)",borderRadius:3}}><div style={{width:s.v+"%",height:"100%",background:s.c,borderRadius:3}}/></div><div style={{fontSize:10,fontFamily:"IBM Plex Mono",marginTop:2,fontWeight:600}}>{s.v}/100</div></div>)}
+          </div>}
+          {/* Manpower */}
+          {v.manpower&&v.manpower.headcount>0&&<div style={{background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:8,padding:8,marginBottom:8,display:"flex",gap:16,fontSize:11,color:"var(--t2)"}}>
+            <span>👷 {v.manpower.headcount} staff</span>
+            <span>💰 Avg CTC: ₹{(v.manpower.avgCTC||0).toLocaleString("en-IN")}</span>
+            <span style={{color:v.manpower.statutoryCompliant?"var(--ok)":"var(--err)"}}>{v.manpower.statutoryCompliant?"✅ Statutory OK":"❌ Statutory Gap"}</span>
+            <span style={{color:v.manpower.minWageCompliant?"var(--ok)":"var(--err)"}}>{v.manpower.minWageCompliant?"✅ Min Wage OK":"❌ Below Min Wage"}</span>
+          </div>}
+          {/* Strengths & Weaknesses */}
+          <div style={{display:"flex",gap:16,fontSize:10,flexWrap:"wrap"}}>
+            {v.strengths?.filter(Boolean).length>0&&<div style={{color:"var(--ok)"}}>{v.strengths.map((s,j)=><span key={j}>✓ {s} </span>)}</div>}
+            {v.weaknesses?.filter(Boolean).length>0&&<div style={{color:"var(--warn)"}}>{v.weaknesses.map((w,j)=><span key={j}>⚠ {w} </span>)}</div>}
+          </div>
+          {/* Scope Gaps & Red Flags */}
+          {v.scopeGaps?.filter(Boolean).length>0&&<div style={{marginTop:6,fontSize:10,color:"var(--err)"}}>Scope gaps: {v.scopeGaps.join(", ")}</div>}
+          {v.redFlags?.filter(Boolean).length>0&&<div style={{marginTop:4,fontSize:10,color:"var(--err)",fontWeight:600}}>🚩 {v.redFlags.join(" | ")}</div>}
+        </div>)})}
+    </div>}
+
+    {/* Cost Comparison Table */}
+    {r.costComparison?.length>0&&<div style={{marginBottom:16}}><div style={{fontSize:14,fontWeight:700,marginBottom:8}}>💰 Normalized Cost Comparison</div>
+      <div style={{overflowX:"auto",border:"1px solid var(--s2)",borderRadius:10}}>
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+        <thead><tr style={{background:"var(--s2)"}}>
+          <th style={{padding:"8px 10px",textAlign:"left",fontWeight:600,fontSize:10}}>Component</th>
+          {vNames.map((n,i)=><th key={i} style={{padding:"8px 10px",textAlign:"right",fontWeight:700,fontSize:10,color:i===0&&r.l1Assessment?.l1Vendor===n?"var(--warn)":"var(--t1)"}}>{n}</th>)}
+          <th style={{padding:"8px 10px",textAlign:"right",fontWeight:600,fontSize:10,color:"var(--t3)"}}>Benchmark</th>
+        </tr></thead>
+        <tbody>{r.costComparison.map((row,i)=>{
+          const isTotal=row.component?.toLowerCase().includes("total");
+          return(<tr key={i} style={{borderBottom:"1px solid var(--s2)",background:isTotal?"rgba(124,58,237,.04)":"transparent",fontWeight:isTotal?700:400}}>
+            <td style={{padding:"6px 10px"}}>{row.component}</td>
+            {compCols.map((ck,j)=><td key={j} style={{padding:"6px 10px",textAlign:"right",fontFamily:"IBM Plex Mono",fontSize:isTotal?12:11}}>₹{(row[ck]||0).toLocaleString("en-IN")}</td>)}
+            <td style={{padding:"6px 10px",textAlign:"right",fontSize:10,color:"var(--t3)"}}>{row.benchmark||"—"}</td>
+          </tr>)})}</tbody>
+      </table></div>
+    </div>}
+
+    {/* Commercial Terms Comparison */}
+    {r.commercialComparison?.length>0&&<div style={{marginBottom:16}}><div style={{fontSize:14,fontWeight:700,marginBottom:8}}>📋 Commercial Terms Comparison</div>
+      <div style={{overflowX:"auto",border:"1px solid var(--s2)",borderRadius:10}}>
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+        <thead><tr style={{background:"var(--s2)"}}>
+          <th style={{padding:"8px 10px",textAlign:"left",fontWeight:600,fontSize:10}}>Parameter</th>
+          <th style={{padding:"8px 10px",textAlign:"left",fontWeight:600,fontSize:10,color:"#7c3aed"}}>RFP Requirement</th>
+          {vNames.map((n,i)=><th key={i} style={{padding:"8px 10px",textAlign:"left",fontWeight:600,fontSize:10}}>{n}</th>)}
+          <th style={{padding:"8px 10px",textAlign:"center",fontWeight:600,fontSize:10}}>Winner</th>
+        </tr></thead>
+        <tbody>{r.commercialComparison.map((row,i)=>
+          <tr key={i} style={{borderBottom:"1px solid var(--s2)"}}>
+            <td style={{padding:"6px 10px",fontWeight:600}}>{row.parameter}</td>
+            <td style={{padding:"6px 10px",fontSize:10,color:"#7c3aed"}}>{row.rfpRequirement||"—"}</td>
+            {compCols.map((ck,j)=><td key={j} style={{padding:"6px 10px",fontSize:10,color:"var(--t2)"}}>{row[ck]||"—"}</td>)}
+            <td style={{padding:"6px 10px",textAlign:"center",fontWeight:700,color:"var(--ok)",fontSize:10}}>{row.winner||"—"}</td>
+          </tr>)}</tbody>
+      </table></div>
+    </div>}
+
+    {/* Compliance Matrix */}
+    {r.complianceMatrix?.length>0&&<div style={{marginBottom:16}}><div style={{fontSize:14,fontWeight:700,marginBottom:8}}>✅ Compliance Matrix</div>
+      <div style={{overflowX:"auto",border:"1px solid var(--s2)",borderRadius:10}}>
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+        <thead><tr style={{background:"var(--s2)"}}>
+          <th style={{padding:"8px 10px",textAlign:"left",fontWeight:600,fontSize:10}}>Requirement</th>
+          {vNames.map((n,i)=><th key={i} style={{padding:"8px 10px",textAlign:"center",fontWeight:600,fontSize:10}}>{n}</th>)}
+        </tr></thead>
+        <tbody>{r.complianceMatrix.map((row,i)=>
+          <tr key={i} style={{borderBottom:"1px solid var(--s2)"}}>
+            <td style={{padding:"6px 10px",fontWeight:500}}>{row.requirement}</td>
+            {compCols.map((ck,j)=>{const val=row[ck]||"";const color=val.includes("OK")||val.includes("✅")?"var(--ok)":val.includes("MISSING")||val.includes("❌")?"var(--err)":"var(--warn)";
+              return <td key={j} style={{padding:"6px 10px",textAlign:"center",fontWeight:700,color,fontSize:12}}>{val}</td>})}
+          </tr>)}</tbody>
+      </table></div>
+    </div>}
+
+    {/* L1 Assessment */}
+    {r.l1Assessment&&<div style={{marginBottom:16}}>
+      <div style={{fontSize:14,fontWeight:700,marginBottom:10}}>🎯 L1 Assessment</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:12}}>
+        <div style={{background:"rgba(245,158,11,.04)",border:"1px solid rgba(245,158,11,.2)",borderRadius:10,padding:14,textAlign:"center"}}>
+          <div style={{fontSize:9,color:"var(--t3)",textTransform:"uppercase",marginBottom:4}}>L1 (Lowest)</div>
+          <div style={{fontSize:14,fontWeight:800,color:"var(--warn)"}}>{r.l1Assessment.l1Vendor}</div>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:16,fontWeight:700}}>₹{(r.l1Assessment.l1Total||0).toLocaleString("en-IN")}</div>
+        </div>
+        <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:14,textAlign:"center"}}>
+          <div style={{fontSize:9,color:"var(--t3)",textTransform:"uppercase",marginBottom:4}}>L2</div>
+          <div style={{fontSize:14,fontWeight:800}}>{r.l1Assessment.l2Vendor}</div>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:16,fontWeight:700}}>₹{(r.l1Assessment.l2Total||0).toLocaleString("en-IN")}</div>
+        </div>
+        <div style={{background:r.l1Assessment.isL1Genuine?"rgba(16,185,129,.04)":"rgba(244,63,94,.04)",border:"1px solid "+(r.l1Assessment.isL1Genuine?"rgba(16,185,129,.2)":"rgba(244,63,94,.2)"),borderRadius:10,padding:14,textAlign:"center"}}>
+          <div style={{fontSize:9,color:"var(--t3)",textTransform:"uppercase",marginBottom:4}}>L1-L2 Gap</div>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:18,fontWeight:800,color:r.l1Assessment.isL1Genuine?"var(--ok)":"var(--err)"}}>{r.l1Assessment.priceDifference}</div>
+          <div style={{fontSize:10,fontWeight:700,color:r.l1Assessment.isL1Genuine?"var(--ok)":"var(--err)"}}>{r.l1Assessment.isL1Genuine?"✅ L1 Genuine":"⚠️ Underbidding Risk"}</div>
+        </div>
+      </div>
+      {!r.l1Assessment.isL1Genuine&&r.l1Assessment.l1Risks?.filter(Boolean).length>0&&<div style={{background:"rgba(244,63,94,.04)",border:"1px solid rgba(244,63,94,.12)",borderRadius:8,padding:12,marginBottom:10}}>
+        <div style={{fontSize:11,fontWeight:700,color:"var(--err)",marginBottom:4}}>🚩 L1 Underbidding Risks</div>
+        {r.l1Assessment.l1Risks.map((rk,i)=><div key={i} style={{fontSize:11,color:"var(--t2)",padding:"2px 0"}}>• {rk}</div>)}
+      </div>}
+      {r.l1Assessment.qualityAdjustedL1&&<div style={{background:"rgba(16,185,129,.04)",border:"1px solid rgba(16,185,129,.2)",borderRadius:10,padding:14}}>
+        <div style={{fontSize:11,fontWeight:700,color:"var(--ok)",marginBottom:4}}>✅ Quality-Adjusted Recommendation</div>
+        <div style={{fontSize:13,fontWeight:800,color:"var(--ok)",marginBottom:4}}>{r.l1Assessment.qualityAdjustedL1}</div>
+        <div style={{fontSize:12,color:"var(--t2)",lineHeight:1.7}}>{r.l1Assessment.recommendation}</div>
+      </div>}
+    </div>}
+
+    {/* Negotiation Tips */}
+    {r.negotiationTips&&<div style={{marginBottom:16}}>
+      <div style={{fontSize:14,fontWeight:700,marginBottom:10}}>💡 Negotiation Strategy</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+        <div style={{background:"rgba(245,158,11,.04)",border:"1px solid rgba(245,158,11,.15)",borderRadius:10,padding:14}}>
+          <div style={{fontSize:11,fontWeight:700,color:"var(--warn)",marginBottom:6}}>🎯 Negotiate with L1</div>
+          {r.negotiationTips.withL1?.map((t,i)=><div key={i} style={{fontSize:11,color:"var(--t2)",padding:"3px 0",paddingLeft:12,position:"relative"}}><span style={{position:"absolute",left:0,color:"var(--warn)"}}>→</span>{t}</div>)}
+        </div>
+        <div style={{background:"rgba(59,130,246,.04)",border:"1px solid rgba(59,130,246,.15)",borderRadius:10,padding:14}}>
+          <div style={{fontSize:11,fontWeight:700,color:"var(--ac)",marginBottom:6}}>🔄 Leverage with L2</div>
+          {r.negotiationTips.withL2?.map((t,i)=><div key={i} style={{fontSize:11,color:"var(--t2)",padding:"3px 0",paddingLeft:12,position:"relative"}}><span style={{position:"absolute",left:0,color:"var(--ac)"}}>→</span>{t}</div>)}
+        </div>
+      </div>
+      {r.negotiationTips.generalLeverage?.filter(Boolean).length>0&&<div style={{marginBottom:10}}>
+        <div style={{fontSize:11,fontWeight:700,marginBottom:4}}>📊 Market Leverage</div>
+        {r.negotiationTips.generalLeverage.map((t,i)=><div key={i} style={{fontSize:11,color:"var(--t2)",padding:"2px 0"}}>• {t}</div>)}
+      </div>}
+      <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
+        {r.negotiationTips.expectedSavings&&<div style={{background:"rgba(16,185,129,.06)",border:"1px solid rgba(16,185,129,.2)",borderRadius:8,padding:10,flex:1}}>
+          <div style={{fontSize:9,color:"var(--t3)",textTransform:"uppercase"}}>Expected Savings</div>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:16,fontWeight:800,color:"var(--ok)"}}>{r.negotiationTips.expectedSavings}</div>
+        </div>}
+        {r.negotiationTips.suggestedCounterOffer&&<div style={{background:"rgba(124,58,237,.04)",border:"1px solid rgba(124,58,237,.15)",borderRadius:8,padding:10,flex:2}}>
+          <div style={{fontSize:9,color:"var(--t3)",textTransform:"uppercase"}}>Suggested Counter-Offer</div>
+          <div style={{fontSize:12,color:"var(--t2)",lineHeight:1.6}}>{r.negotiationTips.suggestedCounterOffer}</div>
+        </div>}
+      </div>
+    </div>}
+
+    {/* Risk Flags */}
+    {r.riskFlags?.filter(Boolean).length>0&&<div style={{marginBottom:16}}><div style={{fontSize:13,fontWeight:700,color:"var(--err)",marginBottom:8}}>🚩 Risk Flags</div>
+      {r.riskFlags.map((f,i)=><div key={i} style={{fontSize:11,color:"var(--warn)",padding:"3px 0"}}>⚠ {f}</div>)}</div>}
+
+    {/* Next Steps */}
+    {r.recommendedNextSteps?.length>0&&<div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:14}}><div style={{fontSize:12,fontWeight:700,marginBottom:6}}>📌 Recommended Next Steps</div>
+      {r.recommendedNextSteps.map((s,i)=><div key={i} style={{fontSize:11,color:"var(--t2)",padding:"3px 0"}}>{i+1}. {s}</div>)}</div>}
+  </div>)};
+
+  const renderResult=()=>{
+    if(!result)return null;
+    if(tool.id==="price-check")return renderPriceCheck(result);
+    if(tool.id==="contract-analyzer")return renderContract(result);
+    if(tool.id==="rfq-comparator")return renderRFQ(result);
+    if(tool.id==="negotiation-brief")return renderNegotiation(result);
+    if(tool.id==="quote-analysis")return renderQuoteAnalysis(result);
+    if(tool.id==="service-comparator")return renderServiceComparator(result);
+    return <pre style={{fontSize:11,color:"var(--t2)",whiteSpace:"pre-wrap"}}>{JSON.stringify(result,null,2)}</pre>;
+  };
+
+  if(result)return(<div style={{maxWidth:750}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,flexWrap:"wrap",gap:6}}>
+      <button className="btn-sec" style={{fontSize:11}} onClick={()=>{setResult(null);setActRes(null)}}>← Back</button>
+      <div style={{display:"flex",gap:6}}><button className="btn-sec" style={{fontSize:11}} onClick={()=>{setResult(null);setActRes(null);setFormData({});setFiles([])}}>New Analysis</button></div>
+    </div>
+    <div className="rpt-header"><span style={{fontSize:24}}>{tool.icon}</span><div><div style={{fontSize:18,fontWeight:800,fontFamily:"'Bricolage Grotesque'"}}>{tool.name}</div><div style={{fontSize:10,color:"var(--t3)"}}>AI-Generated • {new Date().toLocaleDateString("en-IN")} • CostLens</div><div style={{fontSize:8,color:"var(--t3)",marginTop:2,fontStyle:"italic"}}>{AI_DISCLAIMER}</div></div></div>
+    {renderResult()}
+    <SmartActionsPanel/>
+  </div>);
+
+  return(<div style={{maxWidth:700}}>
+    <button className="btn-sec" style={{marginBottom:12,fontSize:11}} onClick={onBack}>← All AI Tools</button>
+    <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
+      <span style={{fontSize:28}}>{tool.icon}</span>
+      <div><div style={{fontSize:18,fontWeight:700}}>{tool.name}</div><div style={{fontSize:12,color:"var(--t2)"}}>{tool.desc}</div></div>
+    </div>
+    {tool.inputType==="form"&&<div style={{display:"grid",gap:10,marginBottom:14}}>
+      {tool.fields.map(f=><div key={f.k}><label style={{fontSize:11,fontWeight:600,color:"var(--t2)",display:"block",marginBottom:3}}>{f.l}</label>
+        <input type={f.t||"text"} value={formData[f.k]||""} onChange={e=>setField(f.k,e.target.value)} placeholder={f.ph} style={{width:"100%",padding:"8px 12px",borderRadius:8,border:"1px solid var(--s3)",background:"var(--s1)",color:"var(--t1)",fontSize:12,fontFamily:"DM Sans"}}/></div>)}
+    </div>}
+    {tool.inputType==="file"&&<div style={{marginBottom:14}}>
+      <div style={{fontSize:11,fontWeight:600,color:"var(--t2)",marginBottom:6}}>{tool.fileLabel}</div>
+      <FileUpload files={files} onChange={setFiles}/>
+    </div>}
+    <textarea className="mod-notes" value={notes} onChange={e=>setNotes(e.target.value)} placeholder="Additional context or notes (optional)..." style={{marginBottom:10}}/>
+    {err&&<div className="mod-err">{err}</div>}
+    {loading&&<div className="mod-loading">🤖 AI analyzing... This may take 15-45 seconds.</div>}
+    <button className="btn-pri" onClick={runAI} disabled={loading} style={{padding:"10px 28px",fontSize:13}}>{loading?"Analyzing...":"Run AI Analysis"} ({tool.credits} credit{tool.credits>1?"s":""})</button>
+    <div style={{fontSize:9,color:"var(--t3)",marginTop:6,fontStyle:"italic"}}>⚠️ {AI_DISCLAIMER}</div>
+
+    {/* ═══ Sample Report Preview — Price Reasonableness Check ═══ */}
+    {tool.id==="price-check"&&!result&&<div style={{marginTop:24}}>
+      <div style={{fontSize:14,fontWeight:700,marginBottom:10,color:"var(--t1)"}}>📋 Sample Report Preview — What You'll Get</div>
+      <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:12,overflow:"hidden"}}>
+        <div style={{background:"linear-gradient(135deg,rgba(16,185,129,.08),rgba(59,130,246,.08))",padding:16,borderBottom:"1px solid var(--s2)"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+            <div><div style={{fontSize:9,fontWeight:700,color:"#10b981",textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>PRICE REASONABLENESS CHECK</div>
+              <div style={{fontSize:15,fontWeight:800}}>CNC Motor Housing — Aluminum 6061</div>
+              <div style={{fontSize:11,color:"var(--t2)"}}>Investment Casting • 2.3 kg • 5,000 pcs/yr • Supplier: Rajkot, Gujarat</div></div>
+            <div style={{textAlign:"center",background:"rgba(239,68,68,.08)",border:"2px solid rgba(239,68,68,.3)",borderRadius:12,padding:"12px 20px"}}>
+              <div style={{fontSize:9,color:"var(--err)",fontWeight:700}}>VERDICT</div>
+              <div style={{fontSize:22,fontWeight:900,color:"var(--err)"}}>HIGH</div>
+              <div style={{fontSize:10,color:"var(--err)"}}>+14.2% above fair range</div>
+            </div>
+          </div>
+        </div>
+        <div style={{padding:14}}>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>
+            <div style={{background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:8,padding:10,textAlign:"center"}}>
+              <div style={{fontSize:9,color:"var(--t3)"}}>QUOTED PRICE</div>
+              <div style={{fontFamily:"IBM Plex Mono",fontSize:18,fontWeight:800,color:"var(--err)"}}>₹480</div></div>
+            <div style={{background:"rgba(16,185,129,.04)",border:"1px solid rgba(16,185,129,.2)",borderRadius:8,padding:10,textAlign:"center"}}>
+              <div style={{fontSize:9,color:"var(--t3)"}}>FAIR RANGE</div>
+              <div style={{fontFamily:"IBM Plex Mono",fontSize:18,fontWeight:800,color:"var(--ok)"}}>₹385–₹420</div></div>
+            <div style={{background:"rgba(245,158,11,.04)",border:"1px solid rgba(245,158,11,.2)",borderRadius:8,padding:10,textAlign:"center"}}>
+              <div style={{fontSize:9,color:"var(--t3)"}}>SAVINGS IF NEGOTIATED</div>
+              <div style={{fontFamily:"IBM Plex Mono",fontSize:18,fontWeight:800,color:"var(--warn)"}}>₹3.0L/yr</div></div>
+          </div>
+          <div style={{fontSize:12,fontWeight:700,marginBottom:6}}>📊 Estimated Cost Breakdown</div>
+          {[{c:"Raw Material (Al 6061 @ ₹230/kg × 2.3kg)",pct:55,v:"₹230"},{c:"Investment Casting + CNC",pct:22,v:"₹88"},{c:"Overheads & Admin (15%)",pct:12,v:"₹48"},{c:"Profit Margin (8%)",pct:8,v:"₹32"},{c:"Packing & Freight",pct:3,v:"₹12"}].map((r,i)=>
+            <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"4px 0"}}>
+              <div style={{flex:1,fontSize:11,color:"var(--t2)"}}>{r.c}</div>
+              <div style={{width:120,height:6,background:"var(--s2)",borderRadius:3}}><div style={{width:r.pct+"%",height:"100%",background:["#3b82f6","#10b981","#f59e0b","#f43f5e","#a78bfa"][i],borderRadius:3}}/></div>
+              <div style={{fontFamily:"IBM Plex Mono",fontSize:10,width:50,textAlign:"right"}}>{r.v}</div>
+            </div>)}
+          <div style={{marginTop:12,fontSize:12,fontWeight:700,marginBottom:6}}>🎯 Negotiation Leverage</div>
+          {["Rajkot has 12+ foundries for this spec — high competition, easy to get 3 counter-quotes","Al 6061 ingot price dropped 6% in last quarter — supplier hasn't passed on benefit","At 5,000 pcs/yr, you qualify for volume pricing — ask for slab-based pricing above 3,000 pcs"].map((p,i)=>
+            <div key={i} style={{fontSize:11,color:"var(--t2)",padding:"3px 0",paddingLeft:14,position:"relative"}}><span style={{position:"absolute",left:0,color:"var(--ac)"}}>→</span>{p}</div>)}
+          <div style={{marginTop:12,background:"rgba(59,130,246,.04)",border:"1px solid rgba(59,130,246,.12)",borderRadius:8,padding:10}}>
+            <div style={{fontSize:10,fontWeight:700,color:"var(--ac)",marginBottom:3}}>📌 Recommended Action</div>
+            <div style={{fontSize:11,color:"var(--t2)",lineHeight:1.6}}>Issue a competitive RFQ to 3-4 Rajkot foundries with target price of ₹400/pc. Use the should-cost breakdown as negotiation backup. Current quote is ₹60-95/pc above fair range — supplier has room to move.</div>
+          </div>
+        </div>
+        <div style={{padding:"8px 14px",borderTop:"1px dashed var(--s3)",textAlign:"center"}}><div style={{fontSize:9,color:"var(--t3)",fontStyle:"italic"}}>Sample with representative data — your actual report will reflect your specific item and quotation</div></div>
+      </div>
+    </div>}
+
+    {/* ═══ Sample Report Preview — Contract Clause Analyzer ═══ */}
+    {tool.id==="contract-analyzer"&&!result&&<div style={{marginTop:24}}>
+      <div style={{fontSize:14,fontWeight:700,marginBottom:10,color:"var(--t1)"}}>📋 Sample Report Preview — What You'll Get</div>
+      <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:12,overflow:"hidden"}}>
+        <div style={{background:"linear-gradient(135deg,rgba(244,63,94,.08),rgba(245,158,11,.08))",padding:16,borderBottom:"1px solid var(--s2)"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+            <div><div style={{fontSize:9,fontWeight:700,color:"#f43f5e",textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>CONTRACT CLAUSE ANALYSIS</div>
+              <div style={{fontSize:15,fontWeight:800}}>Annual Rate Contract — CRS Steel Tubes</div>
+              <div style={{fontSize:11,color:"var(--t2)"}}>Hero Cycles Ltd. ↔ Tata Steel BSL • 12 months • ₹28 Cr value</div></div>
+            <div style={{textAlign:"center",background:"rgba(245,158,11,.08)",border:"2px solid rgba(245,158,11,.3)",borderRadius:12,padding:"12px 20px"}}>
+              <div style={{fontSize:9,color:"var(--warn)",fontWeight:700}}>OVERALL RISK</div>
+              <div style={{fontSize:22,fontWeight:900,color:"var(--warn)"}}>MEDIUM</div>
+              <div style={{fontSize:10,color:"var(--warn)"}}>3 risky • 4 missing clauses</div>
+            </div>
+          </div>
+        </div>
+        <div style={{padding:14}}>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>
+            <div style={{textAlign:"center"}}><div style={{fontSize:24,fontWeight:900,color:"var(--ok)"}}>5</div><div style={{fontSize:10,color:"var(--ok)",fontWeight:600}}>Favorable Clauses</div></div>
+            <div style={{textAlign:"center"}}><div style={{fontSize:24,fontWeight:900,color:"var(--err)"}}>3</div><div style={{fontSize:10,color:"var(--err)",fontWeight:600}}>Risky Clauses</div></div>
+            <div style={{textAlign:"center"}}><div style={{fontSize:24,fontWeight:900,color:"var(--warn)"}}>4</div><div style={{fontSize:10,color:"var(--warn)",fontWeight:600}}>Missing Clauses</div></div>
+          </div>
+          <div style={{fontSize:12,fontWeight:700,marginBottom:6,color:"var(--err)"}}>🚩 Risky Clauses</div>
+          {[
+            {clause:"Auto-Renewal",section:"§12.3",risk:"Contract auto-renews for 12 months if not terminated 90 days before expiry — easy to miss the window",sev:"High"},
+            {clause:"Price Revision",section:"§7.1",risk:"Supplier can revise price with 15-day notice citing 'market conditions' — no cap on increase %",sev:"High"},
+            {clause:"Force Majeure",section:"§14",risk:"Includes 'raw material shortage' as FM — supplier can invoke this to delay deliveries without LD",sev:"Medium"},
+          ].map((r,i)=><div key={i} style={{background:"rgba(244,63,94,.04)",border:"1px solid rgba(244,63,94,.12)",borderRadius:8,padding:10,marginBottom:6}}>
+            <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}><span style={{fontSize:12,fontWeight:700}}>{r.clause}</span><div style={{display:"flex",gap:4}}><span style={{fontSize:9,color:"var(--t3)"}}>{r.section}</span><span style={{fontSize:9,padding:"2px 6px",borderRadius:4,fontWeight:700,color:"#fff",background:r.sev==="High"?"var(--err)":"var(--warn)"}}>{r.sev}</span></div></div>
+            <div style={{fontSize:11,color:"var(--t2)",lineHeight:1.5}}>{r.risk}</div>
+          </div>)}
+          <div style={{fontSize:12,fontWeight:700,marginBottom:6,marginTop:12,color:"var(--warn)"}}>⚠️ Missing Clauses</div>
+          {[
+            {clause:"LD for Late Delivery",imp:"Critical",risk:"No penalty for delays — supplier has no contractual obligation to deliver on time"},
+            {clause:"Quality Rejection Clause",imp:"Critical",risk:"No clear process for rejection, replacement timeline, or cost recovery for defective material"},
+            {clause:"Price Reduction Sharing",imp:"Important",risk:"If raw material prices drop, there's no mechanism to capture the benefit"},
+            {clause:"Confidentiality / NDA",imp:"Good to Have",risk:"No protection for pricing information being shared with competitors"},
+          ].map((m,i)=><div key={i} style={{background:"rgba(245,158,11,.04)",border:"1px solid rgba(245,158,11,.12)",borderRadius:8,padding:10,marginBottom:6}}>
+            <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}><span style={{fontSize:12,fontWeight:700}}>{m.clause}</span><span style={{fontSize:9,padding:"2px 6px",borderRadius:4,fontWeight:700,color:"#fff",background:m.imp==="Critical"?"var(--err)":m.imp==="Important"?"var(--warn)":"var(--ok)"}}>{m.imp}</span></div>
+            <div style={{fontSize:11,color:"var(--t2)",lineHeight:1.5}}>{m.risk}</div>
+          </div>)}
+          <div style={{fontSize:12,fontWeight:700,marginBottom:6,marginTop:12,color:"var(--ok)"}}>✅ Favorable Clauses</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+          {["Payment terms: 60 days from delivery — good for cash flow","Minimum order quantity waived — flexibility to order as needed","Right to audit supplier's books annually — transparency","Insurance coverage by supplier for in-transit damage","Free replacement for defective material within 48 hours"].map((f,i)=>
+            <div key={i} style={{fontSize:10,color:"var(--ok)",padding:"4px 0"}}>✓ {f}</div>)}
+          </div>
+          <div style={{marginTop:12,background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:8,padding:10}}>
+            <div style={{fontSize:10,fontWeight:700,marginBottom:4}}>📌 Top 3 Actions Before Signing</div>
+            {["Add LD clause: 1% per week of delay, capped at 10% — non-negotiable","Cap price revision to commodity index ± 3% with quarterly reset","Remove auto-renewal — switch to manual renewal with 30-day notice"].map((a,i)=>
+              <div key={i} style={{fontSize:11,color:"var(--t2)",padding:"3px 0"}}>{i+1}. {a}</div>)}
+            <div style={{marginTop:6,fontFamily:"IBM Plex Mono",fontSize:12,fontWeight:700,color:"var(--ok)"}}>Estimated value protected: ₹2.8–4.2 Cr</div>
+          </div>
+        </div>
+        <div style={{padding:"0 14px 14px"}}><div style={{fontSize:11,fontWeight:700,color:"var(--t3)",textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>⚡ SMART ACTIONS</div>
+          <div style={{display:"grid",gap:4}}>{["📧 Email Supplier — Request Amendments","📋 Legal Review Brief for Management","💰 Risk-Adjusted Cost Impact Calculator","🔔 Contract Renewal Alert Brief"].map((a,i)=>
+            <div key={i} style={{background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:8,padding:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{fontSize:10,color:"var(--t2)"}}>{a}</span><span style={{fontSize:9,padding:"3px 8px",borderRadius:6,background:"rgba(45,127,249,.15)",color:"var(--ac)",fontWeight:700}}>Run →</span></div>)}</div>
+        </div>
+        <div style={{padding:"8px 14px",borderTop:"1px dashed var(--s3)",textAlign:"center"}}><div style={{fontSize:9,color:"var(--t3)",fontStyle:"italic"}}>Sample with representative data — your actual report will analyze your specific contract document</div></div>
+      </div>
+    </div>}
+
+    {/* ═══ Sample Report Preview — RFQ Response Comparator ═══ */}
+    {tool.id==="rfq-comparator"&&!result&&<div style={{marginTop:24}}>
+      <div style={{fontSize:14,fontWeight:700,marginBottom:10,color:"var(--t1)"}}>📋 Sample Report Preview — What You'll Get</div>
+      <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:12,overflow:"hidden"}}>
+        <div style={{background:"linear-gradient(135deg,rgba(99,102,241,.08),rgba(139,92,246,.08))",padding:16,borderBottom:"1px solid var(--s2)"}}>
+          <div style={{fontSize:9,fontWeight:700,color:"#6366f1",textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>RFQ RESPONSE COMPARISON</div>
+          <div style={{fontSize:15,fontWeight:800}}>Bicycle Frame Assembly — Hi-Tensile Steel</div>
+          <div style={{fontSize:11,color:"var(--t2)"}}>4 vendors compared • 50,000 pcs/yr • Ludhiana cluster</div>
+        </div>
+        <div style={{padding:14}}>
+          <div style={{fontSize:12,fontWeight:700,marginBottom:8}}>🏆 Vendor Rankings</div>
+          {[
+            {rank:1,name:"Munjal Tubes",loc:"Ludhiana",price:"₹342",del:21,score:88,rec:true,str:"Best price + quality",weak:"Longer delivery"},
+            {rank:2,name:"Atlas Steel",loc:"Ludhiana",price:"₹358",del:14,score:82,rec:false,str:"Fastest delivery",weak:"12% premium over L1"},
+            {rank:3,name:"Goel Industries",loc:"Sonepat",price:"₹365",del:18,score:74,rec:false,str:"Good warranty terms",weak:"No IS:4210 cert"},
+            {rank:4,name:"Sharma Metalworks",loc:"Rajkot",price:"₹338",del:35,score:61,rec:false,str:"Lowest price",weak:"35-day lead time, no track record"},
+          ].map((v,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:i<3?"1px solid var(--s2)":"none"}}>
+            <span style={{fontFamily:"IBM Plex Mono",fontSize:14,fontWeight:800,width:28,color:i===0?"var(--ok)":"var(--t3)"}}>#{v.rank}</span>
+            <div style={{flex:1}}><div style={{fontSize:12,fontWeight:700}}>{v.name} <span style={{fontSize:10,color:"var(--t3)",fontWeight:400}}>{v.loc}</span>{v.rec&&<span style={{fontSize:8,fontWeight:700,color:"#fff",background:"var(--ok)",padding:"2px 6px",borderRadius:4,marginLeft:6}}>RECOMMENDED</span>}</div>
+              <div style={{fontSize:10,color:"var(--t2)"}}>✓ {v.str} • ⚠ {v.weak}</div></div>
+            <div style={{textAlign:"right"}}><div style={{fontFamily:"IBM Plex Mono",fontSize:14,fontWeight:700}}>{v.price}</div><div style={{fontSize:9,color:"var(--t3)"}}>{v.del} days</div></div>
+            <div style={{width:60}}><div style={{height:5,background:"var(--s2)",borderRadius:3}}><div style={{width:v.score+"%",height:"100%",background:v.score>=80?"#10b981":"#f59e0b",borderRadius:3}}/></div><div style={{fontSize:9,fontFamily:"IBM Plex Mono",textAlign:"right"}}>{v.score}/100</div></div>
+          </div>)}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginTop:14}}>
+            <div style={{background:"rgba(99,102,241,.04)",border:"1px solid rgba(99,102,241,.15)",borderRadius:8,padding:10}}>
+              <div style={{fontSize:11,fontWeight:700,marginBottom:4}}>🎯 Recommendation</div>
+              <div style={{fontSize:11,color:"var(--t2)",lineHeight:1.6}}>Award to Munjal Tubes (#1). Best techno-commercial score at ₹342/frame. Use Sharma's ₹338 quote to negotiate Munjal down to ₹335-338 range.</div></div>
+            <div style={{background:"rgba(16,185,129,.04)",border:"1px solid rgba(16,185,129,.15)",borderRadius:8,padding:10}}>
+              <div style={{fontSize:11,fontWeight:700,marginBottom:4}}>💰 Savings Potential</div>
+              <div style={{fontFamily:"IBM Plex Mono",fontSize:16,fontWeight:800,color:"var(--ok)"}}>₹8.5–12L/yr</div>
+              <div style={{fontSize:10,color:"var(--t2)"}}>By playing vendors against each other and negotiating payment terms</div></div>
+          </div>
+          {["📧 Award Letter to Winner","📧 Regret Letters to Others","📋 Techno-Commercial Brief for MD","💰 Landed Cost Comparison"].length>0&&<div style={{marginTop:14}}>
+            <div style={{fontSize:11,fontWeight:700,color:"var(--t3)",textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>⚡ SMART ACTIONS</div>
+            <div style={{display:"grid",gap:4}}>{["📧 Award Letter to Winner","📧 Regret Letters to Others","📋 Techno-Commercial Brief for MD","💰 Landed Cost Comparison"].map((a,i)=>
+              <div key={i} style={{background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:8,padding:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{fontSize:10,color:"var(--t2)"}}>{a}</span><span style={{fontSize:9,padding:"3px 8px",borderRadius:6,background:"rgba(45,127,249,.15)",color:"var(--ac)",fontWeight:700}}>Run →</span></div>)}</div>
+          </div>}
+        </div>
+        <div style={{padding:"8px 14px",borderTop:"1px dashed var(--s3)",textAlign:"center"}}><div style={{fontSize:9,color:"var(--t3)",fontStyle:"italic"}}>Sample with representative data — your actual report will compare your uploaded vendor quotations</div></div>
+      </div>
+    </div>}
+
+    {/* ═══ Sample Report Preview — Negotiation Prep Brief ═══ */}
+    {tool.id==="negotiation-brief"&&!result&&<div style={{marginTop:24}}>
+      <div style={{fontSize:14,fontWeight:700,marginBottom:10,color:"var(--t1)"}}>📋 Sample Report Preview — What You'll Get</div>
+      <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:12,overflow:"hidden"}}>
+        <div style={{background:"linear-gradient(135deg,rgba(245,158,11,.08),rgba(16,185,129,.08))",padding:16,borderBottom:"1px solid var(--s2)",textAlign:"center"}}>
+          <div style={{fontSize:9,fontWeight:700,color:"#f59e0b",textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>NEGOTIATION STRATEGY BRIEF</div>
+          <div style={{fontSize:17,fontWeight:900}}>Tata Steel BSL — HR Coil Annual Contract</div>
+          <div style={{fontSize:12,color:"var(--t2)",marginTop:4}}>Annual Spend: ₹12 Cr • Supplier asking 8% increase • 5-year relationship</div>
+          <div style={{marginTop:10,fontFamily:"IBM Plex Mono",fontSize:18,fontWeight:800,color:"var(--ok)"}}>Expected Savings: ₹72–96L/yr</div>
+        </div>
+        <div style={{padding:14}}>
+          <div style={{fontSize:12,fontWeight:700,marginBottom:8}}>💪 Leverage Points</div>
+          {[
+            {point:"SIAM steel index rose only 4.2% — supplier asking 8% is unjustified",strength:"Strong",how:"Show index chart. Demand formula-based pricing linked to SIAM HRC index."},
+            {point:"JSW Steel quoted 3% lower for same spec last quarter",strength:"Strong",how:"Share JSW rate card (redacted). Create urgency around dual-sourcing."},
+            {point:"Your 12 Cr annual volume = 0.8% of their plant capacity — significant customer",strength:"Moderate",how:"Remind them of consistent offtake, no quality issues. Loyalty should be rewarded."},
+          ].map((p,i)=><div key={i} style={{background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:8,padding:10,marginBottom:6}}>
+            <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{fontSize:12,fontWeight:600}}>{p.point}</span><span style={{fontSize:9,padding:"2px 8px",borderRadius:6,fontWeight:700,background:p.strength==="Strong"?"rgba(16,185,129,.1)":"rgba(245,158,11,.1)",color:p.strength==="Strong"?"var(--ok)":"var(--warn)"}}>{p.strength}</span></div>
+            <div style={{fontSize:11,color:"var(--t2)"}}>{p.how}</div></div>)}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginTop:12,marginBottom:14}}>
+            <div style={{background:"rgba(16,185,129,.04)",border:"1px solid rgba(16,185,129,.15)",borderRadius:8,padding:10}}><div style={{fontSize:10,fontWeight:700,color:"var(--ok)",marginBottom:3}}>🎯 Opening Position</div><div style={{fontSize:10,color:"var(--t2)"}}>Demand 0% increase. Cite index data + competitive quotes. Put dual-sourcing on table.</div></div>
+            <div style={{background:"rgba(59,130,246,.04)",border:"1px solid rgba(59,130,246,.15)",borderRadius:8,padding:10}}><div style={{fontSize:10,fontWeight:700,color:"var(--ac)",marginBottom:3}}>✅ Target Outcome</div><div style={{fontSize:10,color:"var(--t2)"}}>Max 2% increase with quarterly index-reset. Lock 12-month price. Add LD clause for delays.</div></div>
+            <div style={{background:"rgba(244,63,94,.04)",border:"1px solid rgba(244,63,94,.15)",borderRadius:8,padding:10}}><div style={{fontSize:10,fontWeight:700,color:"var(--err)",marginBottom:3}}>🚫 Walk-Away</div><div style={{fontSize:10,color:"var(--t2)"}}>If >4% increase or no index linkage. Shift 40% volume to JSW + SAIL within 90 days.</div></div>
+          </div>
+          <div style={{fontSize:12,fontWeight:700,marginBottom:6}}>🔄 Concession Plan</div>
+          {[{seq:1,give:"Advance payment: shift from 60-day to 45-day",get:"2% price reduction (₹24L saving)"},{seq:2,give:"12-month commitment (vs current 6-month)",get:"Fixed pricing with cap at index +1%"},{seq:3,give:"Increase monthly offtake 10% guaranteed",get:"Free delivery to plant (currently ex-works)"}].map((c,i)=>
+            <div key={i} style={{display:"flex",gap:8,padding:"5px 0",borderBottom:"1px solid var(--s2)",alignItems:"center",fontSize:11}}>
+              <span style={{fontFamily:"IBM Plex Mono",color:"var(--ac)",fontWeight:700,width:20}}>#{c.seq}</span>
+              <div style={{flex:1}}><span style={{color:"var(--warn)"}}>Give:</span> <span style={{color:"var(--t2)"}}>{c.give}</span></div>
+              <span style={{color:"var(--t3)"}}>→</span>
+              <div style={{flex:1}}><span style={{color:"var(--ok)"}}>Get:</span> <span style={{color:"var(--t2)"}}>{c.get}</span></div>
+            </div>)}
+          <div style={{marginTop:12,background:"rgba(59,130,246,.04)",border:"1px solid rgba(59,130,246,.15)",borderRadius:10,padding:12}}>
+            <div style={{fontSize:11,fontWeight:700,color:"var(--ac)",marginBottom:4}}>📝 Meeting Opening Script</div>
+            <div style={{fontSize:11,color:"var(--t2)",lineHeight:1.7,fontStyle:"italic"}}>"We value our 5-year partnership with Tata Steel. However, the 8% increase request doesn't align with market reality — the SIAM HRC index moved only 4.2%. We've received competitive offers from JSW at 3% below your current rate. We'd like to discuss an index-linked formula that works for both sides."</div>
+          </div>
+        </div>
+        <div style={{padding:"0 14px 14px"}}><div style={{fontSize:11,fontWeight:700,color:"var(--t3)",textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>⚡ SMART ACTIONS</div>
+          <div style={{display:"grid",gap:4}}>{["📧 Meeting Request Email to Supplier","📋 Pre-Meeting Brief for Team","💰 Target Price Calculator","📧 Post-Negotiation Follow-up Email"].map((a,i)=>
+            <div key={i} style={{background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:8,padding:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{fontSize:10,color:"var(--t2)"}}>{a}</span><span style={{fontSize:9,padding:"3px 8px",borderRadius:6,background:"rgba(45,127,249,.15)",color:"var(--ac)",fontWeight:700}}>Run →</span></div>)}</div>
+        </div>
+        <div style={{padding:"8px 14px",borderTop:"1px dashed var(--s3)",textAlign:"center"}}><div style={{fontSize:9,color:"var(--t3)",fontStyle:"italic"}}>Sample with representative data — your actual report will reflect your specific negotiation context</div></div>
+      </div>
+    </div>}
+
+    {/* ═══ Sample Report Preview — Vendor Quotation Analysis ═══ */}
+    {tool.id==="quote-analysis"&&!result&&<div style={{marginTop:24}}>
+      <div style={{fontSize:14,fontWeight:700,marginBottom:10,color:"var(--t1)"}}>📋 Sample Report Preview — What You'll Get</div>
+      <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:12,overflow:"hidden"}}>
+        <div style={{background:"linear-gradient(135deg,rgba(8,145,178,.08),rgba(99,102,241,.08))",padding:16,borderBottom:"1px solid var(--s2)"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+            <div><div style={{fontSize:9,fontWeight:700,color:"#0891b2",textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>VENDOR QUOTATION ANALYSIS</div>
+              <div style={{fontSize:15,fontWeight:800}}>Precision CNC Components — 8 Line Items</div>
+              <div style={{fontSize:11,color:"var(--t2)"}}>Supplier: Rajkot Engineering Works • Quote Date: 15-Jan-2025 • ₹18.4L total</div></div>
+            <div style={{textAlign:"center",background:"rgba(245,158,11,.08)",border:"2px solid rgba(245,158,11,.3)",borderRadius:12,padding:"12px 20px"}}>
+              <div style={{fontSize:9,color:"var(--warn)",fontWeight:700}}>VERDICT</div>
+              <div style={{fontSize:22,fontWeight:900,color:"var(--warn)"}}>MIXED</div>
+              <div style={{fontSize:10,color:"var(--warn)"}}>3 overpriced • 4 fair • 1 check</div>
+            </div>
+          </div>
+        </div>
+        <div style={{padding:14}}>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>
+            <div style={{background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:8,padding:10,textAlign:"center"}}>
+              <div style={{fontSize:9,color:"var(--t3)"}}>TOTAL QUOTED</div>
+              <div style={{fontFamily:"IBM Plex Mono",fontSize:16,fontWeight:800}}>₹18.4L</div></div>
+            <div style={{background:"rgba(16,185,129,.04)",border:"1px solid rgba(16,185,129,.2)",borderRadius:8,padding:10,textAlign:"center"}}>
+              <div style={{fontSize:9,color:"var(--t3)"}}>FAIR RANGE</div>
+              <div style={{fontFamily:"IBM Plex Mono",fontSize:16,fontWeight:800,color:"var(--ok)"}}>₹14.8–16.2L</div></div>
+            <div style={{background:"rgba(245,158,11,.04)",border:"1px solid rgba(245,158,11,.2)",borderRadius:8,padding:10,textAlign:"center"}}>
+              <div style={{fontSize:9,color:"var(--t3)"}}>SAVINGS POTENTIAL</div>
+              <div style={{fontFamily:"IBM Plex Mono",fontSize:16,fontWeight:800,color:"var(--warn)"}}>₹2.2–3.6L</div></div>
+          </div>
+          <div style={{fontSize:12,fontWeight:700,marginBottom:6}}>📊 Line Item Analysis</div>
+          <div style={{overflowX:"auto",border:"1px solid var(--s2)",borderRadius:8,marginBottom:14}}>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:10}}>
+            <thead><tr style={{background:"var(--s2)"}}>
+              {["#","Item","Qty","Quoted ₹","Fair Range","Verdict"].map((h,i)=><th key={i} style={{padding:"6px 8px",textAlign:"left",fontWeight:600}}>{h}</th>)}</tr></thead>
+            <tbody>{[
+              {sno:1,item:"Motor Housing (Al 6061)",qty:"500",qp:"₹480",fr:"₹385–420",v:"HIGH"},
+              {sno:2,item:"Bearing Cap (EN8)",qty:"1000",qp:"₹125",fr:"₹110–130",v:"FAIR"},
+              {sno:3,item:"Shaft (EN24 H&T)",qty:"500",qp:"₹890",fr:"₹750–820",v:"HIGH"},
+              {sno:4,item:"End Cover (CRC)",qty:"1000",qp:"₹85",fr:"₹80–95",v:"FAIR"},
+              {sno:5,item:"Spacer Ring (Brass)",qty:"2000",qp:"₹32",fr:"₹28–35",v:"FAIR"},
+            ].map((li,i)=><tr key={i} style={{borderBottom:"1px solid var(--s2)"}}>
+              <td style={{padding:"5px 8px",fontFamily:"IBM Plex Mono"}}>{li.sno}</td>
+              <td style={{padding:"5px 8px",fontWeight:500}}>{li.item}</td>
+              <td style={{padding:"5px 8px",fontFamily:"IBM Plex Mono"}}>{li.qty}</td>
+              <td style={{padding:"5px 8px",fontFamily:"IBM Plex Mono",fontWeight:600,color:li.v==="HIGH"?"var(--err)":"var(--t1)"}}>{li.qp}</td>
+              <td style={{padding:"5px 8px",fontFamily:"IBM Plex Mono",color:"var(--ok)"}}>{li.fr}</td>
+              <td style={{padding:"5px 8px"}}><span style={{fontSize:9,padding:"2px 6px",borderRadius:4,fontWeight:700,color:"#fff",background:li.v==="HIGH"?"var(--err)":"var(--ok)"}}>{li.v}</span></td>
+            </tr>)}</tbody>
+          </table></div>
+          <div style={{fontSize:12,fontWeight:700,marginBottom:6,color:"var(--err)"}}>🚩 Overpriced Items</div>
+          {[{item:"Motor Housing",issue:"Quoted ₹480 vs fair ₹385-420. Al 6061 ingot is ₹230/kg — casting + CNC conversion shouldn't exceed ₹150/pc at this volume",action:"Challenge with should-cost breakdown. Get 2 competitive quotes from Rajkot/Coimbatore."},
+            {item:"Shaft (EN24 H&T)",issue:"₹890 vs fair ₹750-820. Heat treatment being charged at ₹80/pc — market rate is ₹45-55/pc for this size",action:"Split heat treatment cost. Get separate quote from heat treatment job shop."}
+          ].map((f,i)=><div key={i} style={{background:"rgba(244,63,94,.04)",border:"1px solid rgba(244,63,94,.12)",borderRadius:8,padding:10,marginBottom:6}}>
+            <div style={{fontSize:11,fontWeight:700,marginBottom:3}}>{f.item}</div>
+            <div style={{fontSize:10,color:"var(--t2)",marginBottom:3}}>{f.issue}</div>
+            <div style={{fontSize:10,color:"var(--ok)"}}>→ {f.action}</div></div>)}
+          <div style={{fontSize:12,fontWeight:700,marginBottom:6,marginTop:12,color:"var(--warn)"}}>⚠️ Commercial Gaps</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
+          {[{term:"Payment Terms",status:"Missing",color:"var(--err)"},{term:"Delivery Schedule",status:"Vague",color:"var(--warn)"},{term:"Warranty",status:"Missing",color:"var(--err)"},{term:"Tooling Cost",status:"Not mentioned",color:"var(--err)"},{term:"Packing Spec",status:"OK",color:"var(--ok)"},{term:"Price Validity",status:"30 days",color:"var(--ok)"}].map((g,i)=>
+            <div key={i} style={{background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:6,padding:8,textAlign:"center"}}>
+              <div style={{fontSize:10,fontWeight:600}}>{g.term}</div>
+              <div style={{fontSize:10,fontWeight:700,color:g.color,marginTop:2}}>{g.status}</div></div>)}
+          </div>
+          <div style={{marginTop:14,background:"rgba(59,130,246,.04)",border:"1px solid rgba(59,130,246,.15)",borderRadius:10,padding:12}}>
+            <div style={{fontSize:11,fontWeight:700,color:"var(--ac)",marginBottom:4}}>🎯 Negotiation Opening</div>
+            <div style={{fontSize:11,color:"var(--t2)",lineHeight:1.7,fontStyle:"italic"}}>"We've reviewed your quotation in detail. While items 2, 4, and 5 are fairly priced, items 1 and 3 are significantly above our benchmark. We'd like to discuss the cost buildup — particularly the casting conversion and heat treatment charges."</div>
+          </div>
+        </div>
+        <div style={{padding:"0 14px 14px"}}><div style={{fontSize:11,fontWeight:700,color:"var(--t3)",textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>⚡ SMART ACTIONS</div>
+          <div style={{display:"grid",gap:4}}>{["📧 Counter-Quotation Email to Supplier","📋 Quotation Brief for Management","💰 Should-Cost Breakdown Calculator","📧 Commercial Terms Correction Letter"].map((a,i)=>
+            <div key={i} style={{background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:8,padding:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{fontSize:10,color:"var(--t2)"}}>{a}</span><span style={{fontSize:9,padding:"3px 8px",borderRadius:6,background:"rgba(45,127,249,.15)",color:"var(--ac)",fontWeight:700}}>Run →</span></div>)}</div>
+        </div>
+        <div style={{padding:"8px 14px",borderTop:"1px dashed var(--s3)",textAlign:"center"}}><div style={{fontSize:9,color:"var(--t3)",fontStyle:"italic"}}>Sample with representative data — your actual report will analyze your specific vendor quotation and drawings</div></div>
+      </div>
+    </div>}
+
+    {/* ═══ Sample Report Preview — Service Comparator ═══ */}
+    {tool.id==="service-comparator"&&!result&&<div style={{marginTop:24}}>
+      <div style={{fontSize:14,fontWeight:700,marginBottom:10,color:"var(--t1)"}}>📋 Sample Report Preview — What You'll Get</div>
+      <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:12,overflow:"hidden"}}>
+        {/* Sample Header */}
+        <div style={{background:"linear-gradient(135deg,rgba(124,58,237,.08),rgba(37,99,235,.08))",padding:16,borderBottom:"1px solid var(--s2)"}}>
+          <div style={{fontSize:9,fontWeight:700,color:"#7c3aed",textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>HOUSEKEEPING AMC Comparison</div>
+          <div style={{fontSize:12,color:"var(--t2)",lineHeight:1.6}}>RFP for comprehensive housekeeping services at 2 manufacturing plants (1,80,000 sq.ft combined). 3 vendors quoted — CleanPro Services, ABC Facility Solutions, and Excel Housekeeping. Contract period: 2 years with annual escalation.</div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:4,marginTop:8}}>{["Daily housekeeping","Pest control — quarterly","Washroom maintenance","Garden & landscaping","Waste management","Deep cleaning — monthly"].map((s,i)=><span key={i} style={{fontSize:9,padding:"2px 8px",borderRadius:6,background:"rgba(124,58,237,.08)",color:"var(--t2)",border:"1px solid rgba(124,58,237,.12)"}}>{s}</span>)}</div>
+        </div>
+
+        {/* Sample Vendor Cards */}
+        <div style={{padding:14}}>
+          <div style={{fontSize:12,fontWeight:700,marginBottom:8}}>🏆 Vendor Rankings</div>
+          {[
+            {rank:1,name:"CleanPro Services",total:"₹38.4L/yr",score:82,badge:"✓ RECOMMENDED",badgeColor:"var(--ok)",strengths:["ISO 9001 certified","8 yrs industrial experience","Full statutory compliance"],weaknesses:["Highest price"],flags:[]},
+            {rank:2,name:"ABC Facility Solutions",total:"₹32.8L/yr",score:68,badge:"L1 — LOWEST",badgeColor:"var(--warn)",strengths:["Lowest price","Local presence"],weaknesses:["No ISO cert","Missing pest control scope"],flags:["⚠️ Below min wage for 4 roles"]},
+            {rank:3,name:"Excel Housekeeping",total:"₹41.2L/yr",score:71,badge:null,badgeColor:null,strengths:["Best manpower ratio","CLRA registered"],weaknesses:["Highest cost","New to industrial"],flags:[]},
+          ].map((v,i)=><div key={i} style={{background:i===0?"rgba(16,185,129,.03)":"var(--bg)",border:"1px solid "+(i===0?"rgba(16,185,129,.2)":"var(--s2)"),borderRadius:10,padding:12,marginBottom:8,position:"relative"}}>
+            <div style={{position:"absolute",top:8,right:8,display:"flex",gap:4}}>
+              {v.badge&&<span style={{fontSize:8,fontWeight:700,color:"#fff",background:v.badgeColor,padding:"2px 8px",borderRadius:6}}>{v.badge}</span>}
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+              <span style={{fontSize:13,fontWeight:700}}>#{v.rank} {v.name}</span>
+              <span style={{fontFamily:"IBM Plex Mono",fontSize:14,fontWeight:700}}>{v.total}</span>
+            </div>
+            <div style={{display:"flex",gap:8,marginBottom:6}}>
+              <div style={{flex:1}}><div style={{fontSize:8,color:"var(--t3)"}}>Overall</div><div style={{height:5,background:"var(--s2)",borderRadius:3}}><div style={{width:v.score+"%",height:"100%",background:v.score>=75?"#10b981":"#f59e0b",borderRadius:3}}/></div><div style={{fontSize:9,fontFamily:"IBM Plex Mono",marginTop:1}}>{v.score}/100</div></div>
+            </div>
+            <div style={{display:"flex",gap:12,fontSize:9,flexWrap:"wrap"}}>
+              <div style={{color:"var(--ok)"}}>{v.strengths.map((s,j)=><span key={j}>✓ {s} </span>)}</div>
+              <div style={{color:"var(--warn)"}}>{v.weaknesses.map((w,j)=><span key={j}>⚠ {w} </span>)}</div>
+            </div>
+            {v.flags.length>0&&<div style={{fontSize:9,color:"var(--err)",marginTop:4,fontWeight:600}}>{v.flags.join(" | ")}</div>}
+          </div>)}
+        </div>
+
+        {/* Sample Cost Comparison */}
+        <div style={{padding:"0 14px 14px"}}>
+          <div style={{fontSize:12,fontWeight:700,marginBottom:6}}>💰 Normalized Cost Comparison (Annual)</div>
+          <div style={{overflowX:"auto",border:"1px solid var(--s2)",borderRadius:8}}>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:10}}>
+            <thead><tr style={{background:"var(--s2)"}}>
+              <th style={{padding:"6px 8px",textAlign:"left"}}>Component</th>
+              <th style={{padding:"6px 8px",textAlign:"right",color:"var(--warn)"}}>ABC (L1)</th>
+              <th style={{padding:"6px 8px",textAlign:"right",color:"var(--ok)"}}>CleanPro</th>
+              <th style={{padding:"6px 8px",textAlign:"right"}}>Excel</th>
+            </tr></thead>
+            <tbody>{[
+              {c:"Manpower (28 staff)",v1:"₹22.4L",v2:"₹26.8L",v3:"₹28.1L"},
+              {c:"Materials & Consumables",v1:"₹3.2L",v2:"₹4.1L",v3:"₹4.8L"},
+              {c:"Equipment & Machines",v1:"₹2.1L",v2:"₹2.5L",v3:"₹3.2L"},
+              {c:"Management Fee (8-12%)",v1:"₹2.6L",v2:"₹3.0L",v3:"₹3.4L"},
+              {c:"GST (18%)",v1:"₹2.5L",v2:"₹2.0L",v3:"₹1.7L"},
+              {c:"TOTAL",v1:"₹32.8L",v2:"₹38.4L",v3:"₹41.2L",bold:true},
+            ].map((row,i)=><tr key={i} style={{borderBottom:"1px solid var(--s2)",fontWeight:row.bold?700:400,background:row.bold?"rgba(124,58,237,.04)":"transparent"}}>
+              <td style={{padding:"5px 8px"}}>{row.c}</td>
+              <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"IBM Plex Mono"}}>{row.v1}</td>
+              <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"IBM Plex Mono"}}>{row.v2}</td>
+              <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"IBM Plex Mono"}}>{row.v3}</td>
+            </tr>)}</tbody>
+          </table></div>
+        </div>
+
+        {/* Sample L1 Assessment */}
+        <div style={{padding:"0 14px 14px"}}>
+          <div style={{fontSize:12,fontWeight:700,marginBottom:6}}>🎯 L1 Assessment</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+            <div style={{background:"rgba(245,158,11,.04)",border:"1px solid rgba(245,158,11,.2)",borderRadius:8,padding:10,textAlign:"center"}}>
+              <div style={{fontSize:8,color:"var(--t3)"}}>L1 (LOWEST)</div>
+              <div style={{fontSize:12,fontWeight:800,color:"var(--warn)"}}>ABC Facility</div>
+              <div style={{fontFamily:"IBM Plex Mono",fontSize:13,fontWeight:700}}>₹32.8L/yr</div>
+            </div>
+            <div style={{background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:8,padding:10,textAlign:"center"}}>
+              <div style={{fontSize:8,color:"var(--t3)"}}>L2</div>
+              <div style={{fontSize:12,fontWeight:800}}>CleanPro</div>
+              <div style={{fontFamily:"IBM Plex Mono",fontSize:13,fontWeight:700}}>₹38.4L/yr</div>
+            </div>
+            <div style={{background:"rgba(244,63,94,.04)",border:"1px solid rgba(244,63,94,.2)",borderRadius:8,padding:10,textAlign:"center"}}>
+              <div style={{fontSize:8,color:"var(--t3)"}}>L1-L2 GAP</div>
+              <div style={{fontFamily:"IBM Plex Mono",fontSize:15,fontWeight:800,color:"var(--err)"}}>₹5.6L (17%)</div>
+              <div style={{fontSize:9,fontWeight:700,color:"var(--err)"}}>⚠️ Underbidding Risk</div>
+            </div>
+          </div>
+          <div style={{marginTop:8,background:"rgba(244,63,94,.04)",border:"1px solid rgba(244,63,94,.12)",borderRadius:8,padding:10}}>
+            <div style={{fontSize:10,fontWeight:700,color:"var(--err)",marginBottom:4}}>🚩 L1 Risks</div>
+            <div style={{fontSize:10,color:"var(--t2)"}}>{["4 roles quoted below min wage — ₹2.8L annual statutory risk","Pest control not included — ₹1.2L scope gap","No CLRA license — legal non-compliance risk"].map((r,i)=><div key={i} style={{padding:"2px 0"}}>• {r}</div>)}</div>
+          </div>
+          <div style={{marginTop:8,background:"rgba(16,185,129,.04)",border:"1px solid rgba(16,185,129,.2)",borderRadius:8,padding:10}}>
+            <div style={{fontSize:10,fontWeight:700,color:"var(--ok)",marginBottom:4}}>✅ Quality-Adjusted Recommendation</div>
+            <div style={{fontSize:11,fontWeight:800,color:"var(--ok)"}}>CleanPro Services (L2)</div>
+            <div style={{fontSize:10,color:"var(--t2)",lineHeight:1.6}}>While ABC is ₹5.6L cheaper, adjusting for scope gaps (₹1.2L), statutory compliance risk (₹2.8L penalty), and quality factors, CleanPro offers better total value. Negotiate CleanPro down 8-10% using L1 price as leverage.</div>
+          </div>
+        </div>
+
+        {/* Sample Negotiation Tips */}
+        <div style={{padding:"0 14px 14px"}}>
+          <div style={{fontSize:12,fontWeight:700,marginBottom:6}}>💡 Negotiation Tips</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+            <div style={{background:"rgba(245,158,11,.04)",border:"1px solid rgba(245,158,11,.15)",borderRadius:8,padding:10}}>
+              <div style={{fontSize:10,fontWeight:700,color:"var(--warn)",marginBottom:4}}>🎯 With L1 (ABC)</div>
+              <div style={{fontSize:10,color:"var(--t2)",lineHeight:1.5}}>→ Demand CLRA license proof before evaluation<br/>→ Ask to include pest control in scope<br/>→ Verify min wage compliance — statutory risk is yours</div>
+            </div>
+            <div style={{background:"rgba(59,130,246,.04)",border:"1px solid rgba(59,130,246,.15)",borderRadius:8,padding:10}}>
+              <div style={{fontSize:10,fontWeight:700,color:"var(--ac)",marginBottom:4}}>🔄 With L2 (CleanPro)</div>
+              <div style={{fontSize:10,color:"var(--t2)",lineHeight:1.5}}>→ Use L1 price as benchmark — ask for 8-10% reduction<br/>→ Propose 2-year lock-in for price concession<br/>→ Request quarterly review clause with KPI penalties</div>
+            </div>
+          </div>
+          <div style={{marginTop:8,display:"flex",gap:8}}>
+            <div style={{flex:1,background:"rgba(16,185,129,.06)",border:"1px solid rgba(16,185,129,.2)",borderRadius:8,padding:10}}>
+              <div style={{fontSize:9,color:"var(--t3)"}}>EXPECTED SAVINGS</div>
+              <div style={{fontFamily:"IBM Plex Mono",fontSize:14,fontWeight:800,color:"var(--ok)"}}>₹3.2–4.8L/yr</div>
+            </div>
+            <div style={{flex:2,background:"rgba(124,58,237,.04)",border:"1px solid rgba(124,58,237,.15)",borderRadius:8,padding:10}}>
+              <div style={{fontSize:9,color:"var(--t3)"}}>SUGGESTED COUNTER-OFFER</div>
+              <div style={{fontSize:10,color:"var(--t2)",lineHeight:1.5}}>Offer CleanPro ₹34.5L/yr (10% below their quote) with a 2-year contract commitment and quarterly performance review with 5% penalty for SLA misses.</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Sample Smart Actions */}
+        <div style={{padding:"0 14px 14px"}}>
+          <div style={{fontSize:11,fontWeight:700,color:"var(--t3)",textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>⚡ SMART ACTIONS — From Insight to Action</div>
+          <div style={{display:"grid",gap:6}}>
+            {["📧 Award Letter to L1 Vendor","📧 Negotiation Email to L1","📋 Management Approval Note","📧 Scope Clarification RFI","📋 Statutory Compliance Checklist"].map((a,i)=>
+              <div key={i} style={{background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:8,padding:10,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span style={{fontSize:11,color:"var(--t2)"}}>{a}</span>
+                <span style={{fontSize:9,padding:"3px 8px",borderRadius:6,background:"rgba(45,127,249,.15)",color:"var(--ac)",fontWeight:700}}>Run →</span>
+              </div>)}
+          </div>
+        </div>
+
+        <div style={{padding:"8px 14px",borderTop:"1px dashed var(--s3)",textAlign:"center"}}>
+          <div style={{fontSize:9,color:"var(--t3)",fontStyle:"italic"}}>This is a sample with representative data — your actual report will be customized to your uploaded RFP/RFQ and vendor quotations</div>
+        </div>
+      </div>
+    </div>}
+  </div>);
+}
+
+function CommodityIntel(){
+const[mode,setMode]=useState("setup");const[wl,setWl]=useState([]);const[ai,setAi]=useState(null);const[ld,setLd]=useState(false);const[err,setErr]=useState(null);const[prog,setProg]=useState("");const[sel,setSel]=useState(null);
+const[actRes,setActRes]=useState(null);const[actLd,setActLd]=useState(null);
+const runAct=async(ac,commodity,signal,decision)=>{setActLd(ac.t);setActRes(null);try{
+const prompts={"email":"Write a professional email to the supplier for "+commodity+". Signal: "+signal+". Decision: "+decision+". Action: "+ac.t+" - "+ac.d+". Include subject line. Keep it professional with numbers.",
+"brief":"Create a 1-page executive procurement brief for "+commodity+". Signal: "+signal+". Decision: "+decision+". Include: Current Situation, Recommendation, Financial Impact, Risk Assessment, Next Steps.",
+"calc":"Do a detailed cost calculation for "+commodity+". Signal: "+signal+". Decision: "+decision+". Show: current vs projected prices, volume-based savings, comparison scenarios.",
+"alert":"Create a price alert monitoring brief for "+commodity+". Signal: "+signal+". Decision: "+decision+". Include: trigger price levels, alert thresholds, action at each level."};
+const r=await apiFetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:API_HEADERS,
+body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:4000,system:"You are a procurement expert assistant. Generate ready-to-use professional content.",tools:[{"type":"web_search_20250305","name":"web_search","max_uses":2}],messages:[{role:"user",content:prompts[ac.type]||prompts.brief}]})});
+if(!r.ok)throw new Error("API "+r.status);const d=await r.json();const txt=stripCites(d.content.filter(x=>x.type==="text").map(x=>x.text).join("\n"));
+setActRes({title:ac.t,type:ac.type,content:txt});}catch(e){setActRes({title:ac.t,type:"error",content:"Failed: "+e.message})}finally{setActLd(null)}};
+const tog=id=>setWl(p=>{if(p.find(w=>w.id===id))return p.filter(w=>w.id!==id);const m=CI_AC.find(x=>x.id===id);return[...p,{id,vol:0,per:m&&m.u.includes("kg")?"kg/month":"MT/month"}]});
+const sV=(id,v)=>setWl(p=>p.map(w=>w.id===id?{...w,vol:parseFloat(v)||0}:w));
+const sPr=(id,pr)=>setWl(p=>p.map(w=>w.id===id?{...w,per:pr}:w));
+const gen=async()=>{if(!wl.length){setErr("Select at least 1 commodity");return}if(wl.some(w=>w.vol<=0)){setErr("Enter volume for all selected commodities");return}setLd(true);setErr(null);try{const bs=[];for(let i=0;i<wl.length;i+=8)bs.push(wl.slice(i,i+8));let items=[],sum="",tip="";for(let b=0;b<bs.length;b++){setProg("Searching live prices & analyzing "+(bs.length>1?"batch "+(b+1)+"/"+bs.length:"your commodities")+"...");const r=await apiFetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:API_HEADERS,body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:16000,system:CI_SYS,tools:[{"type":"web_search_20250305","name":"web_search","max_uses":5}],messages:[{role:"user",content:ciBPr(bs[b])}]})});if(!r.ok)throw new Error("API "+r.status);const d=await r.json();const txt=d.content.filter(x=>x.type==="text").map(x=>x.text).join("\n");const p=ciTP(txt);items=[...items,...(p.items||[])];if(p.summary)sum+=(sum?" ":"")+p.summary;if(p.tip)tip=p.tip}setAi({items,summary:sum,tip});setMode("dash");setProg("")}catch(e){console.error(e);setErr("AI failed: "+e.message)}finally{setLd(false)}};
+// SETUP
+if(mode==="setup"){return(<div style={{maxWidth:900,margin:"0 auto"}}>
+<div style={{marginBottom:24}}>
+<div style={{fontSize:10,padding:"3px 10px",borderRadius:10,background:"rgba(16,185,129,.1)",color:"#10b981",fontWeight:700,letterSpacing:1,display:"inline-block",marginBottom:8}}>COSTLENS COMMODITY INTELLIGENCE</div>
+<div style={{fontSize:24,fontWeight:800,marginBottom:4,color:"var(--t1)"}}>Build Your Watchlist</div>
+<div style={{fontSize:13,color:"var(--t2)",lineHeight:1.7}}>Select commodities you procure. Enter monthly or annual volume. AI searches live prices and generates personalized intelligence.</div>
+</div>
+{CI_CATS.map(cat=><div key={cat} style={{marginBottom:16}}>
+<div style={{fontSize:11,fontWeight:700,color:"var(--t3)",marginBottom:8,textTransform:"uppercase",letterSpacing:1.5}}>{cat}</div>
+<div style={{display:"grid",gap:6}}>
+{CI_AC.filter(m=>m.cat===cat).map(m=>{const inW=wl.find(w=>w.id===m.id);return(<div key={m.id} style={{background:inW?"rgba(16,185,129,.05)":"var(--s1)",border:"1px solid "+(inW?"rgba(16,185,129,.2)":"var(--s2)"),borderRadius:12,padding:14}}>
+<div style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer"}} onClick={()=>tog(m.id)}>
+<div style={{width:22,height:22,borderRadius:6,border:"2px solid "+(inW?"#10b981":"var(--s3)"),background:inW?"#10b981":"transparent",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,color:"#fff",flexShrink:0}}>{inW?"✓":""}</div>
+<span style={{fontSize:20}}>{m.ic}</span>
+<div style={{flex:1}}><div style={{fontSize:14,fontWeight:700,color:"var(--t1)"}}>{m.n}</div><div style={{fontSize:10,color:"var(--t3)"}}>{m.ix+" • "+m.u}</div></div>
+</div>
+{inW&&<div style={{display:"flex",alignItems:"center",gap:10,marginTop:10,marginLeft:32}}>
+<span style={{fontSize:11,color:"var(--t2)"}}>Volume:</span>
+<input type="number" value={inW.vol||""} placeholder="0" onChange={e=>sV(m.id,e.target.value)} style={{width:100,padding:"7px 10px",borderRadius:8,border:"1px solid var(--s2)",background:"var(--bg)",color:"var(--t1)",fontSize:14,fontFamily:"monospace",textAlign:"right"}}/>
+<select value={inW.per} onChange={e=>sPr(m.id,e.target.value)} style={{padding:"7px 8px",borderRadius:8,border:"1px solid var(--s2)",background:"var(--bg)",color:"var(--t1)",fontSize:12}}>
+<option value="MT/month">MT/month</option><option value="MT/year">MT/year</option><option value="kg/month">kg/month</option><option value="kg/year">kg/year</option>
+</select></div>}
+</div>)})}
+</div></div>)}
+{wl.length>0&&<div style={{position:"sticky",bottom:0,padding:"16px 0",background:"var(--bg)",borderTop:"1px solid var(--s2)"}}>
+<div style={{display:"flex",alignItems:"center",gap:12}}>
+<div style={{flex:1,fontSize:13,color:"var(--t2)"}}>{wl.length+" selected"}</div>
+<button className="btn-pri" onClick={gen} disabled={ld} style={{padding:"12px 32px",fontSize:14,fontWeight:800,opacity:ld?0.6:1}}>{ld?prog||"Analyzing...":"⚡ Generate AI Intelligence"}</button>
+</div>{err&&<div style={{marginTop:8,color:"var(--err)",fontSize:12}}>{err}</div>}
+</div>}
+</div>)}
+// DETAIL
+if(sel){const m=CI_AC.find(x=>x.id===sel);const a=ai?.items?.find(x=>x.id===sel);const w=wl.find(x=>x.id===sel);if(!m||!a)return null;
+const reasons=(a.reasons||"").split("|").map(r=>r.trim()).filter(Boolean);
+return(<div style={{maxWidth:900,margin:"0 auto"}}>
+<div style={{cursor:"pointer",color:"var(--ac)",fontSize:12,marginBottom:20}} onClick={()=>setSel(null)}>← My Watchlist</div>
+<div style={{display:"flex",alignItems:"center",gap:12,marginBottom:16,flexWrap:"wrap"}}>
+<span style={{fontSize:32}}>{m.ic}</span>
+<div style={{flex:1}}><div style={{fontSize:22,fontWeight:800,color:"var(--t1)"}}>{m.n}</div><div style={{fontSize:11,color:"var(--t3)"}}>{m.ix+" • "+m.u+(w?" • "+w.vol+" "+w.per:"")}</div></div>
+<span style={{fontSize:14,padding:"6px 18px",borderRadius:10,background:ciSC(a.signal),color:"#fff",fontWeight:800,letterSpacing:2}}>{a.signal}</span></div>
+<div style={{display:"grid",gap:14}}>
+<div style={{background:ciSB(a.signal),border:"2px solid "+ciSC(a.signal)+"44",borderRadius:16,padding:20}}>
+<div style={{fontSize:11,fontWeight:700,marginBottom:6,color:ciSC(a.signal),textTransform:"uppercase",letterSpacing:1}}>DECISION</div>
+<div style={{fontSize:17,fontWeight:800,lineHeight:1.5,color:"var(--t1)"}}>{a.decision}</div>
+<div style={{fontSize:10,color:"var(--t3)",marginTop:8}}>{"Confidence: "+a.conf}</div></div>
+<div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:14,padding:18}}>
+<div style={{fontSize:11,fontWeight:700,marginBottom:8,color:"var(--t3)",textTransform:"uppercase",letterSpacing:1}}>OUTLOOK</div>
+<div style={{fontSize:13,color:"var(--t2)",lineHeight:1.8}}>{a.outlook}</div></div>
+<div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:14,padding:18}}>
+<div style={{fontSize:11,fontWeight:700,marginBottom:10,color:"var(--t3)",textTransform:"uppercase",letterSpacing:1}}>WHY THIS DECISION?</div>
+{reasons.map((r,i)=><div key={i} style={{display:"flex",gap:10,padding:"6px 0",borderBottom:i<reasons.length-1?"1px solid var(--s2)":"none"}}>
+<span style={{color:"var(--ac)",fontWeight:700,minWidth:20}}>{(i+1)+"."}</span>
+<span style={{fontSize:13,color:"var(--t1)",lineHeight:1.6}}>{r}</span></div>)}</div>
+<div style={{background:"rgba(16,185,129,.05)",border:"1px solid rgba(16,185,129,.15)",borderRadius:14,padding:18}}>
+<div style={{fontSize:11,fontWeight:700,color:"#10b981",marginBottom:8,textTransform:"uppercase",letterSpacing:1}}>POTENTIAL SAVING / IMPACT</div>
+<div style={{fontSize:14,color:"var(--t1)",lineHeight:1.8}}>{a.savImpact}</div></div>
+<div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+<div style={{background:"rgba(245,158,11,.05)",border:"1px solid rgba(245,158,11,.15)",borderRadius:14,padding:16}}>
+<div style={{fontSize:11,fontWeight:700,color:"#f59e0b",marginBottom:6}}>SHORT-TERM RISK (30-60d)</div>
+<div style={{fontSize:12,color:"var(--t1)",lineHeight:1.7}}>{a.riskShort}</div></div>
+<div style={{background:"rgba(239,68,68,.05)",border:"1px solid rgba(239,68,68,.15)",borderRadius:14,padding:16}}>
+<div style={{fontSize:11,fontWeight:700,color:"#ef4444",marginBottom:6}}>LONG-TERM RISK (90d+)</div>
+<div style={{fontSize:12,color:"var(--t1)",lineHeight:1.7}}>{a.riskLong}</div></div></div>
+<div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:14,padding:18}}>
+<div style={{fontSize:11,fontWeight:700,marginBottom:8,color:"var(--t3)",textTransform:"uppercase",letterSpacing:1}}>NEGOTIATION SCRIPT</div>
+<div style={{fontSize:13,color:"var(--t1)",lineHeight:1.9,background:"var(--bg)",borderRadius:10,padding:16,borderLeft:"3px solid var(--ac)"}}>{a.script}</div></div>
+<div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:14,padding:18}}>
+<div style={{fontSize:11,fontWeight:700,marginBottom:8,color:"var(--t3)",textTransform:"uppercase",letterSpacing:1}}>CONTRACT CLAUSE</div>
+<div style={{fontSize:12,color:"var(--t2)",lineHeight:1.8,background:"var(--bg)",borderRadius:10,padding:16,fontFamily:"monospace",borderLeft:"3px solid #10b981"}}>{a.clause}</div></div>
+{a.actions&&a.actions.length>0&&<div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:14,padding:18}}>
+<div style={{fontSize:11,fontWeight:700,marginBottom:10,color:"var(--t3)",textTransform:"uppercase",letterSpacing:1}}>SMART AI ACTIONS</div>
+<div style={{display:"grid",gap:8}}>
+{a.actions.map((ac,i)=><div key={i} onClick={()=>runAct(ac,m.n,a.signal,a.decision)} style={{background:"var(--bg)",border:"1px solid "+(actLd===ac.t?"var(--ac)":"var(--s2)"),borderRadius:10,padding:14,display:"flex",alignItems:"center",gap:12,cursor:actLd?"not-allowed":"pointer",opacity:actLd&&actLd!==ac.t?0.5:1}}>
+<span style={{fontSize:18}}>{ac.type==="email"?"📧":ac.type==="brief"?"📋":ac.type==="calc"?"💰":"🔔"}</span>
+<div style={{flex:1}}><div style={{fontSize:13,fontWeight:600,color:"var(--t1)"}}>{ac.t}</div><div style={{fontSize:11,color:"var(--t3)"}}>{ac.d}</div></div>
+{actLd===ac.t?<div style={{width:16,height:16,border:"2px solid var(--ac)",borderTopColor:"transparent",borderRadius:"50%",animation:"ciSpin 1s linear infinite"}}/>:<span style={{fontSize:10,padding:"4px 10px",borderRadius:8,background:"rgba(45,127,249,.15)",color:"var(--ac)",fontWeight:700}}>Run →</span>}
+</div>)}</div></div>}
+{actRes&&<div style={{background:actRes.type==="error"?"rgba(239,68,68,.05)":"rgba(45,127,249,.05)",border:"1px solid "+(actRes.type==="error"?"rgba(239,68,68,.2)":"rgba(45,127,249,.2)"),borderRadius:14,padding:18}}>
+<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+<div style={{fontSize:13,fontWeight:700,color:actRes.type==="error"?"var(--err)":"var(--ac)"}}>{actRes.title}</div>
+<div style={{display:"flex",gap:6}}>
+<button onClick={()=>navigator.clipboard.writeText(actRes.content)} style={{fontSize:10,padding:"4px 10px",borderRadius:6,border:"1px solid var(--s3)",background:"var(--s2)",color:"var(--t2)",cursor:"pointer"}}>Copy</button>
+<button onClick={()=>setActRes(null)} style={{fontSize:10,padding:"4px 10px",borderRadius:6,border:"1px solid var(--s3)",background:"var(--s2)",color:"var(--t2)",cursor:"pointer"}}>Close</button>
+</div></div>
+<div style={{fontSize:13,color:"var(--t1)",lineHeight:1.9,whiteSpace:"pre-wrap",fontFamily:actRes.type==="calc"?"monospace":"inherit"}}>{actRes.content}</div></div>}
+<style>{"@keyframes ciSpin{to{transform:rotate(360deg)}}"}</style>
+</div></div>)}
+// DASHBOARD
+const buys=(ai?.items||[]).filter(x=>x.signal==="BUY");const waits=(ai?.items||[]).filter(x=>x.signal==="WAIT");const holds=(ai?.items||[]).filter(x=>x.signal==="HOLD"||x.signal==="MONITOR");
+const CC=({a})=>{const m=CI_AC.find(x=>x.id===a.id);const w=wl.find(x=>x.id===a.id);if(!m)return null;return(
+<div onClick={()=>setSel(a.id)} style={{background:ciSB(a.signal),border:"1px solid "+ciSC(a.signal)+"22",borderRadius:14,padding:16,cursor:"pointer",transition:"all .15s"}}>
+<div style={{display:"flex",alignItems:"flex-start",gap:12}}>
+<span style={{fontSize:24,marginTop:2}}>{m.ic}</span>
+<div style={{flex:1}}>
+<div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4,flexWrap:"wrap"}}>
+<span style={{fontSize:15,fontWeight:700,color:"var(--t1)"}}>{m.n}</span>
+<span style={{fontSize:9,padding:"2px 10px",borderRadius:8,background:ciSC(a.signal),color:"#fff",fontWeight:700}}>{a.signal}</span>
+<span style={{fontSize:10,color:"var(--t3)"}}>{a.conf}</span></div>
+<div style={{fontSize:13,color:"var(--t1)",lineHeight:1.6,marginBottom:6,fontWeight:600}}>{a.decision}</div>
+<div style={{fontSize:11,color:"var(--t3)"}}>{a.savImpact}</div>
+{w&&<div style={{fontSize:10,color:"var(--t3)",marginTop:4}}>Your volume: {w.vol+" "+w.per}</div>}
+</div><span style={{color:"var(--ac)",fontSize:16,marginTop:4}}>→</span>
+</div></div>)};
+return(<div style={{maxWidth:960,margin:"0 auto"}}>
+<div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:20,flexWrap:"wrap",gap:10}}>
+<div>
+<div style={{fontSize:10,padding:"3px 10px",borderRadius:10,background:"rgba(16,185,129,.1)",color:"#10b981",fontWeight:700,letterSpacing:1,display:"inline-block",marginBottom:6}}>MY COMMODITY WATCHLIST</div>
+<div style={{fontSize:22,fontWeight:800,color:"var(--t1)"}}>What Should You Do This Week?</div>
+<div style={{fontSize:12,color:"var(--t3)",marginTop:3}}>{wl.length+" commodities • AI-powered decisions"}</div></div>
+<div style={{display:"flex",gap:6}}>
+<button className="btn-sec" onClick={()=>setMode("setup")} style={{fontSize:11,padding:"8px 14px"}}>Edit Watchlist</button>
+<button className="btn-pri" onClick={gen} disabled={ld} style={{fontSize:11,padding:"8px 14px"}}>{ld?prog||"...":"⚡ Refresh AI"}</button>
+</div></div>
+{ai?.summary&&<div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:14,padding:16,marginBottom:16}}>
+<div style={{fontSize:12,fontWeight:700,color:"var(--t1)",marginBottom:6}}>Market Overview</div>
+<div style={{fontSize:13,color:"var(--t2)",lineHeight:1.8}}>{ai.summary}</div></div>}
+{buys.length>0&&<div style={{marginBottom:20}}>
+<div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
+<span style={{background:"#10b981",color:"#fff",padding:"4px 14px",borderRadius:8,fontSize:12,fontWeight:800}}>BUY NOW</span>
+<span style={{fontSize:12,color:"var(--t3)"}}>{buys.length}</span></div>
+<div style={{display:"grid",gap:10}}>{buys.map(a=><CC key={a.id} a={a}/>)}</div></div>}
+{waits.length>0&&<div style={{marginBottom:20}}>
+<div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
+<span style={{background:"#ef4444",color:"#fff",padding:"4px 14px",borderRadius:8,fontSize:12,fontWeight:800}}>WAIT / DON'T BUY</span>
+<span style={{fontSize:12,color:"var(--t3)"}}>{waits.length}</span></div>
+<div style={{display:"grid",gap:10}}>{waits.map(a=><CC key={a.id} a={a}/>)}</div></div>}
+{holds.length>0&&<div style={{marginBottom:20}}>
+<div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
+<span style={{background:"var(--s3)",color:"var(--t2)",padding:"4px 14px",borderRadius:8,fontSize:12,fontWeight:700}}>HOLD / MONITOR</span>
+<span style={{fontSize:12,color:"var(--t3)"}}>{holds.length}</span></div>
+<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:8}}>
+{holds.map(a=>{const m=CI_AC.find(x=>x.id===a.id);if(!m)return null;return(
+<div key={a.id} onClick={()=>setSel(a.id)} style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:12,padding:14,cursor:"pointer"}}>
+<div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+<span style={{fontSize:18}}>{m.ic}</span>
+<span style={{fontSize:13,fontWeight:700,flex:1,color:"var(--t1)"}}>{m.n}</span>
+<span style={{fontSize:9,padding:"2px 8px",borderRadius:8,background:ciSB(a.signal),color:ciSC(a.signal),fontWeight:700}}>{a.signal}</span></div>
+<div style={{fontSize:11,color:"var(--t3)",lineHeight:1.5}}>{a.decision}</div></div>)})}</div></div>}
+{ai?.tip&&<div style={{background:"rgba(245,158,11,.05)",border:"1px solid rgba(245,158,11,.15)",borderRadius:14,padding:16,marginBottom:16}}>
+<div style={{fontSize:12,fontWeight:700,color:"#f59e0b",marginBottom:6}}>Weekly Procurement Tip</div>
+<div style={{fontSize:13,color:"var(--t1)",lineHeight:1.8}}>{ai.tip}</div></div>}
+<div style={{textAlign:"center",padding:"16px 0",borderTop:"1px solid var(--s2)",color:"var(--t3)",fontSize:11}}>
+<span style={{fontWeight:800,color:"var(--t1)"}}>Cost</span><span style={{fontWeight:800,color:"var(--ac)"}}>Lens</span> AI Commodity Intelligence • Powered by Claude AI
+<div style={{fontSize:9,color:"var(--t3)",marginTop:4,fontStyle:"italic"}}>{AI_DISCLAIMER}</div></div>
+</div>)}
+
+// ═══════════════════════════════════════════════════════════════
+// NDA DIGITAL SIGN-OFF
+// ═══════════════════════════════════════════════════════════════
+function NDASignOff({user}){
+  const[signed,setSigned]=useState(false);
+  const[form,setForm]=useState({name:"",company:"",designation:"",email:user?.email||""});
+  const[agreed,setAgreed]=useState(false);
+  const[showFull,setShowFull]=useState(false);
+  const[savedNDA,setSavedNDA]=useState(null);
+
+  useEffect(()=>{(async()=>{try{const n=await dbGet("cl-nda-"+((user?.email)||"guest"));if(n)setSavedNDA(n)}catch{}})()},[user]);
+
+  const signNDA=async()=>{
+    if(!form.name||!form.company||!form.email){return}
+    const nda={...form,signedAt:new Date().toISOString(),ip:"client-side",version:"NDA-v1.0-2025"};
+    setSigned(true);setSavedNDA(nda);
+    try{await dbSet("cl-nda-"+(user?.email||"guest"),nda);
+      const ndas=await dbGet("cl-ndas-all")||[];ndas.push(nda);await dbSet("cl-ndas-all",ndas)}catch{}
+  };
+
+  const ndaText=`MUTUAL NON-DISCLOSURE AGREEMENT (NDA)
+
+Effective Date: Date of digital signature below
+
+BETWEEN:
+(1) CostLens Technologies Pvt. Ltd., having its registered office at Noida, Uttar Pradesh 201301, India ("CostLens")
+(2) The undersigned organization ("Client")
+
+1. PURPOSE
+This Agreement governs the confidentiality of information exchanged between the parties in connection with the Client's use of the CostLens procurement intelligence platform, including but not limited to the upload and processing of procurement data for AI-powered analysis.
+
+2. DEFINITION OF CONFIDENTIAL INFORMATION
+"Confidential Information" means all non-public information disclosed by either party, including but not limited to:
+(a) Procurement data: supplier names, pricing, purchase orders, spend data, cost breakdowns, BOM details
+(b) Business information: negotiation strategies, category plans, savings targets, supplier relationships
+(c) Technical information: platform features, algorithms, analytical methodologies
+(d) Financial information: budgets, revenue figures, cost structures
+
+3. OBLIGATIONS OF RECEIVING PARTY
+Each party agrees to:
+(a) Use Confidential Information solely for the purpose of providing or receiving CostLens services
+(b) Not disclose Confidential Information to any third party without prior written consent
+(c) Protect Confidential Information with at least the same degree of care used for its own confidential information
+(d) Limit access to Confidential Information to employees and contractors with a need-to-know basis
+(e) Return or destroy Confidential Information upon written request
+
+4. DATA PROCESSING SPECIFICS
+CostLens additionally warrants that:
+(a) Client procurement data uploaded to the platform is processed in-memory only and is not persistently stored on any server
+(b) Client data is NOT used for training, fine-tuning, or improving any AI models
+(c) No CostLens personnel has access to view Client's raw uploaded data or analysis results
+(d) Client-side anonymization features, when enabled, replace supplier names before data leaves the Client's browser
+(e) All data transmission uses TLS 1.3 (256-bit) encryption
+
+5. EXCLUSIONS
+This Agreement does not apply to information that:
+(a) Is or becomes publicly available through no fault of the receiving party
+(b) Was known to the receiving party before disclosure
+(c) Is independently developed by the receiving party
+(d) Is disclosed with the prior written approval of the disclosing party
+(e) Is required to be disclosed by law, regulation, or court order
+
+6. TERM
+This Agreement shall remain in effect for two (2) years from the date of execution. Obligations of confidentiality shall survive termination for a period of two (2) additional years.
+
+7. REMEDIES
+Both parties acknowledge that breach of this Agreement may cause irreparable harm and that monetary damages may be insufficient. The non-breaching party shall be entitled to seek injunctive relief in addition to any other remedies available at law.
+
+8. GOVERNING LAW
+This Agreement shall be governed by the laws of India. Any disputes shall be subject to the exclusive jurisdiction of the courts in New Delhi.
+
+9. LIMITATION OF LIABILITY
+Neither party's aggregate liability under this Agreement shall exceed ₹10,00,000 (Rupees Ten Lakhs) or the total fees paid by Client to CostLens in the preceding 12 months, whichever is greater.
+
+10. ENTIRE AGREEMENT
+This Agreement constitutes the entire understanding between the parties regarding confidentiality and supersedes all prior negotiations and agreements on this subject.`;
+
+  if(savedNDA&&!signed)return(
+    <div className="nda-signed">
+      <div style={{fontSize:28}}>✅</div>
+      <div>
+        <div style={{fontSize:14,fontWeight:700,color:"var(--ok)"}}>NDA Signed</div>
+        <div style={{fontSize:11,color:"var(--t2)"}}>Signed by <strong>{savedNDA.name}</strong> ({savedNDA.company}) on {new Date(savedNDA.signedAt).toLocaleDateString("en-IN",{day:"numeric",month:"short",year:"numeric"})}</div>
+        <div style={{fontSize:10,color:"var(--t3)",marginTop:2}}>Version: {savedNDA.version} • A copy has been sent to {savedNDA.email}</div>
+      </div>
+    </div>);
+
+  if(signed)return(
+    <div className="nda-signed" style={{flexDirection:"column",textAlign:"center"}}>
+      <div style={{fontSize:36,marginBottom:8}}>✅</div>
+      <div style={{fontSize:16,fontWeight:800,color:"var(--ok)",marginBottom:4}}>NDA Successfully Signed!</div>
+      <div style={{fontSize:12,color:"var(--t2)",lineHeight:1.6}}>
+        Mutual NDA executed between <strong>{form.company}</strong> and <strong>CostLens Technologies Pvt. Ltd.</strong><br/>
+        Signed by: <strong>{form.name}</strong> ({form.designation})<br/>
+        Date: {new Date().toLocaleDateString("en-IN",{day:"numeric",month:"long",year:"numeric"})}<br/>
+        Reference: NDA-{Date.now().toString(36).toUpperCase()}
+      </div>
+      <div style={{fontSize:10,color:"var(--t3)",marginTop:8}}>A confirmation has been recorded. For a countersigned PDF copy, contact enterprise@costlens.technology</div>
+    </div>);
+
+  return(<div className="nda-box">
+    <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
+      <div style={{fontSize:24}}>📋</div>
+      <div><div style={{fontSize:15,fontWeight:700}}>Mutual Non-Disclosure Agreement</div>
+      <div style={{fontSize:11,color:"var(--t2)"}}>Standard 2-year mutual NDA covering procurement data confidentiality</div></div>
+    </div>
+
+    <div style={{marginBottom:12}}>
+      <button className="btn-sec" style={{fontSize:11}} onClick={()=>setShowFull(!showFull)}>{showFull?"Hide":"Read"} Full NDA Text {showFull?"▲":"▼"}</button>
+    </div>
+
+    {showFull&&<div style={{background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:8,padding:16,marginBottom:16,maxHeight:400,overflowY:"auto"}}>
+      <pre style={{fontSize:10,color:"var(--t2)",lineHeight:1.7,whiteSpace:"pre-wrap",fontFamily:"'DM Sans',sans-serif"}}>{ndaText}</pre>
+    </div>}
+
+    <div style={{fontSize:12,fontWeight:700,marginBottom:10}}>Sign Digitally</div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
+      <div><div style={{fontSize:10,color:"var(--t3)",marginBottom:3}}>Full Name *</div>
+        <input value={form.name} onChange={e=>setForm({...form,name:e.target.value})} placeholder="Your full name" style={{width:"100%",padding:"8px 12px",borderRadius:6,border:"1px solid var(--s3)",background:"var(--bg)",color:"var(--t1)",fontSize:12}}/></div>
+      <div><div style={{fontSize:10,color:"var(--t3)",marginBottom:3}}>Company / Organization *</div>
+        <input value={form.company} onChange={e=>setForm({...form,company:e.target.value})} placeholder="Your company name" style={{width:"100%",padding:"8px 12px",borderRadius:6,border:"1px solid var(--s3)",background:"var(--bg)",color:"var(--t1)",fontSize:12}}/></div>
+      <div><div style={{fontSize:10,color:"var(--t3)",marginBottom:3}}>Designation</div>
+        <input value={form.designation} onChange={e=>setForm({...form,designation:e.target.value})} placeholder="e.g., CPO, Head - Procurement" style={{width:"100%",padding:"8px 12px",borderRadius:6,border:"1px solid var(--s3)",background:"var(--bg)",color:"var(--t1)",fontSize:12}}/></div>
+      <div><div style={{fontSize:10,color:"var(--t3)",marginBottom:3}}>Email *</div>
+        <input value={form.email} onChange={e=>setForm({...form,email:e.target.value})} placeholder="official@company.com" style={{width:"100%",padding:"8px 12px",borderRadius:6,border:"1px solid var(--s3)",background:"var(--bg)",color:"var(--t1)",fontSize:12}}/></div>
+    </div>
+
+    <div onClick={()=>setAgreed(!agreed)} style={{display:"flex",gap:8,alignItems:"flex-start",cursor:"pointer",marginBottom:14}}>
+      <div style={{width:18,height:18,borderRadius:4,border:"2px solid "+(agreed?"var(--ac)":"var(--s3)"),background:agreed?"var(--ac)":"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,marginTop:1}}>
+        {agreed&&<span style={{color:"#fff",fontSize:12,fontWeight:800}}>✓</span>}
+      </div>
+      <div style={{fontSize:11,color:"var(--t2)",lineHeight:1.5}}>I have read and agree to the terms of this Mutual Non-Disclosure Agreement on behalf of my organization. I confirm I have the authority to enter into this agreement.</div>
+    </div>
+
+    <button className="btn-pri" style={{width:"100%",padding:"12px",fontSize:14}} onClick={signNDA} disabled={!agreed||!form.name||!form.company||!form.email}>
+      ✍️ Sign NDA Digitally
+    </button>
+    <div style={{fontSize:9,color:"var(--t3)",textAlign:"center",marginTop:8}}>By signing, you agree to the mutual NDA terms above. Both parties are bound by equal obligations. A countersigned copy will be provided via email.</div>
+  </div>);
+}
+
+// ═══ ADMIN DASHBOARD ═══
+function AdminDashboard(){
+  const[data,setData]=useState(null);const[loading,setLoading]=useState(true);const[tab,setTab]=useState("users");
+  useEffect(()=>{(async()=>{
+    const users=await dbGet("cl-users")||{};
+    const events=await dbGet("cl-beta-events")||[];
+    const usedCodes=await dbGet("cl-beta-used-codes")||{};
+    const betaUsers=Object.entries(users).filter(([_,u])=>u.isBeta).map(([email,u])=>({email,name:u.name,joined:u.joined,credits:u.credits,plan:u.plan,code:u.betaCode,isAdmin:u.isAdmin}));
+    const unauthorized=events.filter(e=>e.type==="INVALID_CODE"||e.type==="CODE_REUSE"||e.type==="UNAUTHORIZED_REGISTER"||e.type==="UNAUTHORIZED_LOGIN");
+    setData({users:betaUsers,events,unauthorized,usedCodes,allUsers:users});setLoading(false);
+  })()},[]);
+  if(loading)return <div style={{padding:40,textAlign:"center",color:"var(--t3)"}}>Loading admin data...</div>;
+  const totalCodes=BETA_CODES.length;
+  const usedCount=Object.keys(data.usedCodes).length;
+  const availCount=totalCodes-usedCount;
+  return(<div>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:10,marginBottom:20}}>
+      {[["Total Codes",totalCodes,"#7c3aed"],["Used / Registered",usedCount,"var(--ok)"],["Available Codes",availCount,"var(--warn)"],["Unauthorized Attempts",data.unauthorized.length,"var(--err)"],["Days Left",betaDaysLeft(),"var(--ac)"]].map(([l,v,c],i)=>
+        <div key={i} style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:14,textAlign:"center"}}>
+          <div style={{fontSize:9,color:"var(--t3)",textTransform:"uppercase",marginBottom:4}}>{l}</div>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:22,fontWeight:800,color:c}}>{v}</div>
+        </div>)}
+    </div>
+    <div style={{display:"flex",gap:6,marginBottom:16}}>
+      {["users","codes","unauthorized","activity"].map(t=>
+        <button key={t} onClick={()=>setTab(t)} style={{fontSize:11,fontWeight:tab===t?700:400,padding:"6px 16px",borderRadius:8,border:"1px solid "+(tab===t?"var(--ac)":"var(--s3)"),background:tab===t?"rgba(45,127,249,.1)":"var(--s1)",color:tab===t?"var(--ac)":"var(--t2)",cursor:"pointer",textTransform:"capitalize"}}>{t==="unauthorized"?"🚨 Unauthorized":t==="users"?"👥 Beta Users":t==="activity"?"📋 Activity Log":"🔑 Invite Codes"}</button>)}
+    </div>
+    {tab==="users"&&<div>
+      <div style={{fontSize:14,fontWeight:700,marginBottom:10}}>👥 Registered Beta Users ({data.users.length})</div>
+      {data.users.length===0?<div style={{padding:20,textAlign:"center",color:"var(--t3)"}}>No beta users registered yet</div>:
+      <div style={{border:"1px solid var(--s2)",borderRadius:10,overflow:"hidden"}}>
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+        <thead><tr style={{background:"var(--s2)"}}>
+          {["Name","Email","Code Used","Joined","Credits Left","Role"].map((h,i)=><th key={i} style={{padding:"8px 10px",textAlign:"left",fontWeight:600,fontSize:10}}>{h}</th>)}
+        </tr></thead>
+        <tbody>{data.users.map((u,i)=><tr key={i} style={{borderBottom:"1px solid var(--s2)"}}>
+          <td style={{padding:"6px 10px",fontWeight:600}}>{u.name}</td>
+          <td style={{padding:"6px 10px",fontFamily:"IBM Plex Mono",fontSize:10}}>{u.email}</td>
+          <td style={{padding:"6px 10px",fontFamily:"IBM Plex Mono",fontWeight:700,color:"#7c3aed"}}>{u.code}</td>
+          <td style={{padding:"6px 10px",fontSize:10,color:"var(--t3)"}}>{new Date(u.joined).toLocaleDateString("en-IN",{day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"})}</td>
+          <td style={{padding:"6px 10px",fontFamily:"IBM Plex Mono"}}><span style={{color:u.credits>20?"var(--ok)":u.credits>5?"var(--warn)":"var(--err)"}}>{u.credits}/50</span></td>
+          <td style={{padding:"6px 10px"}}><span style={{fontSize:9,padding:"2px 8px",borderRadius:4,fontWeight:700,color:"#fff",background:u.isAdmin?"#f43f5e":"#7c3aed"}}>{u.isAdmin?"ADMIN":"BETA"}</span></td>
+        </tr>)}</tbody>
+      </table></div>}
+    </div>}
+    {tab==="codes"&&<div>
+      <div style={{fontSize:14,fontWeight:700,marginBottom:10}}>🔑 Invite Codes — {availCount} available, {usedCount} used</div>
+      <div style={{border:"1px solid var(--s2)",borderRadius:10,overflow:"hidden"}}>
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+        <thead><tr style={{background:"var(--s2)"}}>
+          {["#","Invite Code","Status","Used By","Copy Message"].map((h,i)=><th key={i} style={{padding:"8px 10px",textAlign:"left",fontWeight:600,fontSize:10}}>{h}</th>)}
+        </tr></thead>
+        <tbody>{BETA_CODES.map((code,i)=>{
+          const usedBy=data.usedCodes[code];
+          return(<tr key={i} style={{borderBottom:"1px solid var(--s2)",background:usedBy?"rgba(16,185,129,.03)":"transparent"}}>
+          <td style={{padding:"6px 10px",fontFamily:"IBM Plex Mono",fontSize:10}}>{i+1}</td>
+          <td style={{padding:"6px 10px",fontFamily:"IBM Plex Mono",fontWeight:800,fontSize:13,color:usedBy?"var(--t3)":"#7c3aed",letterSpacing:1}}>
+            {code} {!usedBy&&<button onClick={()=>{navigator.clipboard.writeText(code);}} style={{fontSize:8,padding:"2px 6px",borderRadius:4,border:"1px solid var(--s3)",background:"var(--s2)",color:"var(--t2)",cursor:"pointer",marginLeft:4}}>📋</button>}
+          </td>
+          <td style={{padding:"6px 10px"}}><span style={{fontSize:9,padding:"2px 8px",borderRadius:4,fontWeight:700,color:"#fff",background:usedBy?"#10b981":"#f59e0b"}}>{usedBy?"✅ USED":"⏳ AVAILABLE"}</span></td>
+          <td style={{padding:"6px 10px",fontSize:10,color:"var(--t2)"}}>{usedBy||"—"}</td>
+          <td style={{padding:"6px 10px"}}>{!usedBy&&<button onClick={()=>{navigator.clipboard.writeText("Hi! You're invited to try CostLens — AI-powered procurement intelligence.\n\n🔗 Link: https://costlens.technology\n🔑 Invite Code: "+code+"\n\nClick 'Join Beta', enter your email, the code above, and create a password. You get full Pro access for 14 days — all AI tools, reports, and modules.\n\nPlease don't share this code — it's single-use for you only.\n\n— Team CostLens");}} style={{fontSize:9,padding:"4px 10px",borderRadius:6,border:"1px solid var(--ac)",background:"rgba(45,127,249,.1)",color:"var(--ac)",cursor:"pointer",fontWeight:600}}>📱 Copy WhatsApp Invite</button>}</td>
+        </tr>)})}</tbody>
+      </table></div>
+      <div style={{marginTop:10,background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:8,padding:10}}>
+        <div style={{fontSize:10,color:"var(--t3)"}}>Admin code: <span style={{fontFamily:"IBM Plex Mono",fontWeight:700,color:"#f43f5e"}}>{ADMIN_CODE}</span> — unlimited use, for your own testing</div>
+      </div>
+    </div>}
+    {tab==="unauthorized"&&<div>
+      <div style={{fontSize:14,fontWeight:700,marginBottom:10,color:"var(--err)"}}>🚨 Unauthorized / Failed Attempts ({data.unauthorized.length})</div>
+      {data.unauthorized.length===0?<div style={{padding:20,textAlign:"center",color:"var(--ok)"}}>✅ No unauthorized attempts so far</div>:
+      <div style={{border:"1px solid rgba(244,63,94,.2)",borderRadius:10,overflow:"hidden"}}>
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+        <thead><tr style={{background:"rgba(244,63,94,.08)"}}>
+          {["Time","Type","Email","Detail"].map((h,i)=><th key={i} style={{padding:"8px 10px",textAlign:"left",fontWeight:600,fontSize:10,color:"var(--err)"}}>{h}</th>)}
+        </tr></thead>
+        <tbody>{data.unauthorized.slice().reverse().map((e,i)=><tr key={i} style={{borderBottom:"1px solid var(--s2)",background:i%2?"transparent":"rgba(244,63,94,.02)"}}>
+          <td style={{padding:"6px 10px",fontSize:10,fontFamily:"IBM Plex Mono"}}>{new Date(e.ts).toLocaleString("en-IN",{day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"})}</td>
+          <td style={{padding:"6px 10px"}}><span style={{fontSize:9,padding:"2px 6px",borderRadius:4,fontWeight:700,color:"#fff",background:e.type==="INVALID_CODE"?"#dc2626":e.type==="CODE_REUSE"?"#f59e0b":"#ef4444"}}>{e.type.replace(/_/g," ")}</span></td>
+          <td style={{padding:"6px 10px",fontFamily:"IBM Plex Mono",fontWeight:600}}>{e.email}</td>
+          <td style={{padding:"6px 10px",fontSize:10,color:"var(--t2)"}}>{e.detail}</td>
+        </tr>)}</tbody>
+      </table></div>}
+    </div>}
+    {tab==="activity"&&<div>
+      <div style={{fontSize:14,fontWeight:700,marginBottom:10}}>📋 All Activity Log ({data.events.length} events)</div>
+      <div style={{maxHeight:400,overflowY:"auto",border:"1px solid var(--s2)",borderRadius:10}}>
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:10}}>
+        <thead><tr style={{background:"var(--s2)",position:"sticky",top:0}}>
+          {["Time","Event","Email","Detail"].map((h,i)=><th key={i} style={{padding:"6px 8px",textAlign:"left",fontWeight:600}}>{h}</th>)}
+        </tr></thead>
+        <tbody>{data.events.slice().reverse().map((e,i)=>{
+          const isErr=e.type.includes("INVALID")||e.type.includes("REUSE")||e.type.includes("EXPIRED")||e.type.includes("FAILED");
+          return(<tr key={i} style={{borderBottom:"1px solid var(--s2)",background:isErr?"rgba(244,63,94,.03)":"transparent"}}>
+          <td style={{padding:"4px 8px",fontFamily:"IBM Plex Mono",fontSize:9}}>{new Date(e.ts).toLocaleString("en-IN",{day:"numeric",month:"short",hour:"2-digit",minute:"2-digit",second:"2-digit"})}</td>
+          <td style={{padding:"4px 8px"}}><span style={{fontSize:8,padding:"2px 6px",borderRadius:3,fontWeight:700,color:"#fff",background:isErr?"#ef4444":e.type==="BETA_REGISTER"?"#7c3aed":e.type==="LOGIN"?"#3b82f6":e.type==="FEATURE_USE"?"#10b981":e.type==="AI_CREDIT_USED"?"#f59e0b":"#6b7280"}}>{e.type}</span></td>
+          <td style={{padding:"4px 8px",fontFamily:"IBM Plex Mono"}}>{e.email||"—"}</td>
+          <td style={{padding:"4px 8px",color:"var(--t2)"}}>{e.detail||e.feature||e.code||"—"}</td>
+        </tr>)})}</tbody>
+      </table></div>
+    </div>}
+  </div>);
+}
+
+export default function App(){
+  const[user,setUser]=useState(null);const[loading,setLoading]=useState(true);
+  const[showAuth,setShowAuth]=useState(false);const[authMode,setAuthMode]=useState("login");
+  const[aName,setAName]=useState("");const[aEmail,setAEmail]=useState("");const[aPass,setAPass]=useState("");const[aErr,setAErr]=useState("");const[aInvite,setAInvite]=useState("");
+  const[page,setPage]=useState("dashboard");const[activeMod,setActiveMod]=useState(null);const[activeReport,setActiveReport]=useState(null);const[activeTool,setActiveTool]=useState(null);
+  const[lp,setLp]=useState("home");const[showAllFeatures,setShowAllFeatures]=useState(false);const[guideStep,setGuideStep]=useState(null);
+  const[nlEmail,setNlEmail]=useState("");const[nlStatus,setNlStatus]=useState(null);
+  const[theme,setTheme]=useState(()=>{try{return localStorage.getItem("cl-theme")||"light"}catch{return "light"}});
+  const toggleTheme=()=>{const t=theme==="dark"?"light":"dark";setTheme(t);try{localStorage.setItem("cl-theme",t)}catch{}};
+  const[history,setHistory]=useState([]);const[result,setResult]=useState(null);
+  const[plan,setPlan]=useState("free");const[credits,setCredits]=useState(0);
+  const[ebookPreview,setEbookPreview]=useState(null);
+  const[prefs,setPrefs]=useState({company:"",designation:"",phone:"",industry:"Manufacturing — Auto",companySize:"SME (<100 Cr)",accountType:"individual",currency:"INR",defaultOH:15,defaultProfit:8,homeCity:"",favorites:[]});
+  const[showCreditModal,setShowCreditModal]=useState(false);const[feedbackText,setFeedbackText]=useState("");const[feedbackSent,setFeedbackSent]=useState(false);
+  // Load feedbackSent from storage
+  useEffect(()=>{if(user)(async()=>{const sent=await dbGet("cl-feedback-sent-"+user.email);if(sent)setFeedbackSent(true)})()},[user]);
+  // Load feedbackSent from storage
+  useEffect(()=>{if(user)(async()=>{const fb=await dbGet("cl-feedback-sent-"+user.email);if(fb)setFeedbackSent(true)})()},[user]);
+
+  // Load session from storage on mount
+  useEffect(()=>{(async()=>{const sess=await dbGet("cl-session");if(sess){setUser(sess);setPlan(sess.plan||"free");setCredits(sess.credits||0);const h=await dbGet("cl-history-"+sess.email);if(h)setHistory(h);const p=await dbGet("cl-prefs-"+sess.email);if(p)setPrefs(pr=>({...pr,...p}))}setLoading(false)})()},[]);
+  const savePrefs=async(newPrefs)=>{const p={...prefs,...newPrefs};setPrefs(p);if(user)await dbSet("cl-prefs-"+user.email,p)};
+
+  const doAuth=async()=>{setAErr("");
+    const email=aEmail.trim().toLowerCase();
+    if(authMode==="register"&&!aName.trim()){setAErr("Name required");return}
+    if(!email.includes("@")){setAErr("Valid email required");return}
+    if(aPass.length<4){setAErr("Min 4 characters");return}
+    const users=await dbGet("cl-users")||{};
+
+    if(authMode==="register"){
+      if(users[email]){setAErr("Account already exists — please sign in.");return}
+      // ── BETA GATE (code-only) ──
+      if(BETA_CONFIG.enabled){
+        if(isBetaExpired()){setAErr("Beta trial has ended. Thank you for your interest — public launch coming soon!");logBetaEvent("EXPIRED_ATTEMPT",{email});return}
+        const code=aInvite.trim().toUpperCase();
+        if(!code){setAErr("Invite code required. Check the message from CostLens team.");return}
+        // Check if code is valid
+        const isAdmin=code===ADMIN_CODE;
+        const isValidCode=BETA_CODES.includes(code);
+        if(!isAdmin&&!isValidCode){setAErr("Invalid invite code. Please check and try again.");logBetaEvent("INVALID_CODE",{email,detail:"Entered: "+code});return}
+        // Check if code already used by someone else
+        const usedCodes=await dbGet("cl-beta-used-codes")||{};
+        if(!isAdmin&&usedCodes[code]){setAErr("This invite code has already been used by another user. Each code is single-use. Contact founder@costlens.technology for a new code.");logBetaEvent("CODE_REUSE",{email,detail:"Code "+code+" already used by "+usedCodes[code]});return}
+        // Register as beta Pro user
+        if(!isAdmin){usedCodes[code]=email;await dbSet("cl-beta-used-codes",usedCodes)}
+        const isAdminUser=isAdmin||email===BETA_CONFIG.adminEmail;
+        users[email]={name:aName,pass:aPass,plan:"pro",credits:50,joined:new Date().toISOString(),isBeta:true,betaCode:code,isAdmin:isAdminUser};
+        await dbSet("cl-users",users);
+        const u={name:aName,email,plan:"pro",credits:50,isBeta:true,isAdmin:isAdminUser};setUser(u);await dbSet("cl-session",u);setPlan("pro");setCredits(50);setHistory([]);setResult(null);setShowAuth(false);
+        logBetaEvent("BETA_REGISTER",{email,name:aName,code});
+        return;
+      }
+      // Non-beta registration (disabled during beta)
+      users[email]={name:aName,pass:aPass,plan:"free",credits:0,joined:new Date().toISOString()};await dbSet("cl-users",users);const u={name:aName,email,plan:"free",credits:0};setUser(u);await dbSet("cl-session",u);setPlan("free");setCredits(0);setHistory([]);setResult(null);setShowAuth(false)
+    }
+    else{
+      // ── LOGIN ──
+      const u=users[email];
+      if(!u||u.pass!==aPass){
+        setAErr("Invalid email or password");
+        if(BETA_CONFIG.enabled)logBetaEvent("FAILED_LOGIN",{email,detail:"Wrong credentials"});
+        return}
+      if(BETA_CONFIG.enabled&&isBetaExpired()&&u.isBeta){setAErr("Beta trial ended ("+betaEndDate()+"). Thank you for testing CostLens! Public launch coming soon.");logBetaEvent("EXPIRED_LOGIN",{email});return}
+      const sess={name:u.name,email,plan:u.plan||"free",credits:u.credits||0,isBeta:u.isBeta||false,isAdmin:u.isAdmin||email===BETA_CONFIG.adminEmail};setUser(sess);await dbSet("cl-session",sess);setPlan(sess.plan);setCredits(sess.credits);setHistory([]);setResult(null);const h=await dbGet("cl-history-"+email);if(h)setHistory(h);setShowAuth(false);
+      logBetaEvent("LOGIN",{email});
+    }
+  };
+
+  const logout=async()=>{if(user){const users=await dbGet("cl-users")||{};if(users[user.email]){users[user.email].credits=credits;users[user.email].plan=plan;await dbSet("cl-users",users)}}try{localStorage.removeItem("cl_cl-session")}catch{}setUser(null);setHistory([]);setResult(null);setPage("dashboard");setActiveMod(null);setActiveReport(null);setActiveTool(null)};
+
+  const openMod=id=>{setActiveMod(id);setActiveReport(null);setActiveTool(null);setResult(null);setPage("module");if(BETA_CONFIG.enabled&&user)logBetaEvent("FEATURE_USE",{email:user.email,feature:"module:"+id})};
+  const openReport=id=>{setActiveReport(id);setActiveMod(null);setActiveTool(null);setResult(null);setPage("report");if(BETA_CONFIG.enabled&&user)logBetaEvent("FEATURE_USE",{email:user.email,feature:"report:"+id})};
+  const openTool=id=>{setActiveTool(id);setActiveMod(null);setActiveReport(null);setResult(null);setPage("tool");if(BETA_CONFIG.enabled&&user)logBetaEvent("FEATURE_USE",{email:user.email,feature:"tool:"+id})};
+  const handleResult=async r=>{setResult(r);const nh=[{id:Date.now(),...r},...history];setHistory(nh);setPage("result");if(user)await dbSet("cl-history-"+user.email,nh.slice(0,50))};
+  const useCredit=()=>{
+    if(credits<=0){
+      if(BETA_CONFIG.enabled&&user?.isBeta&&!feedbackSent)setShowCreditModal(true);
+      return;
+    }
+    setCredits(c=>{
+      const n=Math.max(0,c-1);
+      // Trigger feedback modal when beta user hits 0
+      if(n===0&&BETA_CONFIG.enabled&&user?.isBeta)setTimeout(()=>setShowCreditModal(true),500);
+      // Save updated credits to storage
+      if(user)(async()=>{const users=await dbGet("cl-users")||{};if(users[user.email]){users[user.email].credits=n;await dbSet("cl-users",users)}const sess={...user,credits:n};await dbSet("cl-session",sess)})();
+      return n;
+    });
+    if(BETA_CONFIG.enabled&&user)logBetaEvent("AI_CREDIT_USED",{email:user.email,detail:"Credits remaining: "+(credits-1)});
+  };
+  const upgrade=async()=>{setPlan("pro");setCredits(50);if(user){const u={...user,plan:"pro",credits:50};setUser(u);await dbSet("cl-session",u);const users=await dbGet("cl-users")||{};if(users[user.email]){users[user.email].plan="pro";users[user.email].credits=50;await dbSet("cl-users",users)}};alert("🎉 Upgraded to Professional (₹1,999/mo or ₹19,999/yr)! 50 AI credits/month, PDF export, unlimited history.")};
+  const cats=[...new Set(MODS.map(m=>m.cat))];
+
+  if(loading)return <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:theme==="light"?"#f4f6fa":"#070b14",color:theme==="light"?"#2563eb":"#2d7ff9",fontFamily:"'DM Sans',sans-serif",fontSize:14}}>Loading CostLens...</div>;
+
+  // ─── AUTH MODAL ───
+  const authModal=showAuth?(<div style={{position:"fixed",inset:0,background:theme==="light"?"rgba(30,41,59,.4)":"rgba(0,0,0,.75)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000}} onMouseDown={e=>{if(e.target===e.currentTarget)setShowAuth(false)}}>    <div style={{background:"var(--s1)",border:"1px solid var(--s3)",borderRadius:16,padding:32,maxWidth:420,width:"90%"}}>
+      <div style={{textAlign:"center",fontSize:28}}><CLIcon size={36}/></div><h2 style={{textAlign:"center",fontSize:20,fontWeight:700,margin:"4px 0 6px"}}>Cost<span style={{color:"var(--ac)"}}>Lens</span></h2>
+      {BETA_CONFIG.enabled&&<div style={{textAlign:"center",marginBottom:12}}>
+        <span style={{fontSize:10,fontWeight:700,color:"#fff",background:"linear-gradient(90deg,#7c3aed,#2563eb)",padding:"3px 12px",borderRadius:20,letterSpacing:1}}>🧪 INVITE-ONLY BETA</span>
+        <div style={{fontSize:10,color:"var(--t3)",marginTop:4}}>Beta access expires {betaEndDate()} • {betaDaysLeft()} days remaining</div>
+      </div>}
+      <h3 style={{fontSize:14,marginBottom:10}}>{authMode==="login"?"Sign In":"Join Beta"}</h3>
+      {aErr&&<div className="mod-err">{aErr}</div>}
+      {authMode==="register"&&<div className="mod-field"><label>Full Name</label><input value={aName} onChange={e=>setAName(e.target.value)} placeholder="Your name" autoComplete="name"/></div>}
+      <div className="mod-field"><label>Email</label><input type="email" value={aEmail} onChange={e=>setAEmail(e.target.value)} placeholder="you@company.com" autoComplete="email"/></div>
+      {authMode==="register"&&BETA_CONFIG.enabled&&<div className="mod-field"><label>Invite Code</label><input value={aInvite} onChange={e=>setAInvite(e.target.value.toUpperCase())} placeholder="e.g. CLENS-7K42" autoComplete="off" name="invite-code-costlens" id="invite-code-costlens" style={{fontFamily:"IBM Plex Mono",letterSpacing:2,textTransform:"uppercase",fontWeight:700}}/></div>}
+      <div className="mod-field"><label>{authMode==="register"?"Create Password":"Password"}</label><input type="password" value={aPass} onChange={e=>setAPass(e.target.value)} placeholder="••••" autoComplete={authMode==="register"?"new-password":"current-password"} onKeyDown={e=>e.key==="Enter"&&doAuth()}/></div>
+      <button className="btn-pri" style={{width:"100%",marginTop:8}} onClick={doAuth}>{authMode==="login"?"Sign In →":"Join Beta →"}</button>
+      {BETA_CONFIG.enabled&&authMode==="register"&&<div style={{marginTop:10,background:"rgba(124,58,237,.06)",border:"1px solid rgba(124,58,237,.12)",borderRadius:8,padding:10}}>
+        <div style={{fontSize:10,color:"var(--t2)",lineHeight:1.5}}>🔒 This is a private beta. You need a valid <b>invite code</b> shared with you. Each code is <b>single-use</b> — it cannot be reused by others. If you don't have one, contact <b>founder@costlens.technology</b></div>
+      </div>}
+      <p style={{textAlign:"center",fontSize:11,color:"var(--t3)",marginTop:10}}>{authMode==="login"?<>Have an invite? <span style={{color:"var(--ac)",cursor:"pointer"}} onClick={()=>{setAuthMode("register");setAErr("")}}>Join Beta</span></>:<>Already registered? <span style={{color:"var(--ac)",cursor:"pointer"}} onClick={()=>{setAuthMode("login");setAErr("")}}>Sign in</span></>}</p>
+    </div></div>):null;
+
+  // ─── EBOOK LIBRARY PAGE ───
+
+  const EbookLibrary=()=>(<div>
+    <div style={{fontSize:20,fontWeight:700,marginBottom:4}}>📚 Procurement Excellence Series</div>
+    <p style={{fontSize:13,color:"var(--t2)",marginBottom:6}}>10 practical ebooks covering procurement frameworks, cost reduction, sourcing strategy, and negotiation techniques for Indian manufacturing.</p>
+    {plan!=="pro"&&<div style={{background:"rgba(245,158,11,.06)",border:"1px solid rgba(245,158,11,.15)",borderRadius:8,padding:"10px 14px",marginBottom:16,display:"flex",alignItems:"center",gap:10}}>
+      <span style={{fontSize:18}}>🔒</span>
+      <div><div style={{fontSize:12,fontWeight:600,color:"var(--warn)"}}>Starter Plan — Preview Mode</div><div style={{fontSize:11,color:"var(--t2)"}}>You can preview Table of Contents + 2 sample pages. Upgrade to Professional for full PDF downloads.</div></div>
+      <button className="btn-pri" style={{fontSize:10,padding:"6px 14px",marginLeft:"auto",whiteSpace:"nowrap",background:"var(--warn)"}} onClick={upgrade}>Upgrade →</button>
+    </div>}
+    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:16}}>
+      {EBOOKS.map(b=><div key={b.id} style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:12,padding:16,display:"flex",flexDirection:"column",alignItems:"center",gap:10,transition:"all .3s"}}>
+        <EbookCover book={b} size="md"/>
+        <div style={{textAlign:"center"}}>
+          <div style={{fontSize:12,fontWeight:600,lineHeight:1.3,marginBottom:4}}>{b.title}</div>
+          <div style={{fontSize:10,color:b.accent,fontWeight:500,marginBottom:6}}>{b.sub}</div>
+          <div style={{fontSize:9,color:"var(--t3)",marginBottom:8}}>{b.pages} pages • PDF</div>
+          {plan==="pro"
+            ?<button className="btn-pri" style={{fontSize:11,padding:"6px 16px"}} onClick={()=>setEbookPreview(b.id)}>📥 Download Full PDF</button>
+            :<button className="btn-sec" style={{fontSize:11,padding:"6px 16px"}} onClick={()=>setEbookPreview(b.id)}>👁️ Preview</button>}
+        </div>
+      </div>)}
+    </div>
+
+    {/* Ebook Preview Modal */}
+    {ebookPreview&&(()=>{
+      const bk=EBOOKS.find(b=>b.id===ebookPreview);
+      const prev=EBOOK_PREVIEWS[ebookPreview];
+      if(!bk||!prev)return null;
+      return(<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.7)",zIndex:9999,display:"flex",alignItems:"center",justifyContent:"center",padding:20}} onClick={()=>setEbookPreview(null)}>
+        <div style={{background:"var(--bg)",borderRadius:16,maxWidth:700,width:"100%",maxHeight:"90vh",overflow:"auto",border:"1px solid var(--s2)",boxShadow:"0 20px 60px rgba(0,0,0,.5)"}} onClick={e=>e.stopPropagation()}>
+          {/* Header */}
+          <div style={{background:bk.bg,padding:"24px 24px 20px",borderRadius:"16px 16px 0 0",position:"relative"}}>
+            <button onClick={()=>setEbookPreview(null)} style={{position:"absolute",top:12,right:12,background:"rgba(255,255,255,.15)",border:"none",color:"#fff",width:28,height:28,borderRadius:"50%",cursor:"pointer",fontSize:14}}>✕</button>
+            <div style={{display:"flex",gap:16,alignItems:"center"}}>
+              <EbookCover book={bk} size="sm"/>
+              <div>
+                <div style={{fontSize:7,fontWeight:600,color:bk.accent,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>Procurement Excellence Series • Book {bk.id}</div>
+                <div style={{fontSize:16,fontWeight:700,color:"#fff",lineHeight:1.3,marginBottom:4,fontFamily:"'Bricolage Grotesque',sans-serif"}}>{bk.title}</div>
+                <div style={{fontSize:11,color:bk.accent,fontWeight:500,marginBottom:6}}>{bk.sub}</div>
+                <div style={{fontSize:10,color:"rgba(255,255,255,.5)"}}>{bk.pages} pages • PDF format</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Table of Contents */}
+          <div style={{padding:"20px 24px",borderBottom:"1px solid var(--s2)"}}>
+            <div style={{fontSize:13,fontWeight:700,marginBottom:10}}>📋 Table of Contents</div>
+            {prev.toc.map((ch,i)=><div key={i} style={{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:i<prev.toc.length-1?"1px solid var(--s2)":"none"}}>
+              <span style={{fontSize:12,color:"var(--t1)"}}>{ch}</span>
+              <span style={{fontSize:10,color:"var(--t3)",fontFamily:"IBM Plex Mono"}}>{Math.floor(bk.pages*((i+1)/prev.toc.length))}</span>
+            </div>)}
+          </div>
+
+          {/* Sample Pages */}
+          <div style={{padding:"20px 24px",borderBottom:"1px solid var(--s2)"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+              <div style={{fontSize:13,fontWeight:700}}>📖 Sample Pages</div>
+              <span style={{fontSize:9,color:"var(--t3)",background:"var(--s1)",padding:"3px 8px",borderRadius:4}}>Preview — 2 of {bk.pages} pages</span>
+            </div>
+            <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:20,fontFamily:"'DM Sans',sans-serif",fontSize:12,color:"var(--t2)",lineHeight:1.8,whiteSpace:"pre-wrap",maxHeight:300,overflow:"auto"}}>
+              {prev.sample}
+            </div>
+            {plan!=="pro"&&<div style={{textAlign:"center",padding:"16px 0 0"}}>
+              <div style={{fontSize:11,color:"var(--t3)",marginBottom:4}}>...remaining {bk.pages-2} pages available with Professional plan</div>
+            </div>}
+          </div>
+
+          {/* Action */}
+          <div style={{padding:"16px 24px",textAlign:"center"}}>
+            {plan==="pro"
+              ?<><button className="btn-pri" style={{fontSize:13,padding:"10px 28px"}} onClick={async()=>{try{await generateEbookPDF(bk,prev);setEbookPreview(null)}catch(e){alert("PDF generation failed: "+e.message)}}}>📥 Download Full PDF ({bk.pages} pages)</button>
+                <div style={{fontSize:9,color:"var(--t3)",marginTop:6}}>Full PDF with all chapters, templates, and checklists</div></>
+              :<><button className="btn-pri" style={{fontSize:13,padding:"10px 28px",background:"var(--warn)"}} onClick={upgrade}>⚡ Upgrade to Professional — Unlock All 10 Ebooks</button>
+                <div style={{fontSize:9,color:"var(--t3)",marginTop:6}}>₹1,999/mo • Full PDFs + 50 AI credits + unlimited history</div></>}
+          </div>
+        </div>
+      </div>)})()}
+  </div>);
+
+  // ─── FOOTER PAGES ───
+  const goHome=()=>{setLp("home");window.scrollTo(0,0)};
+  const FooterPage=({title,children})=>(<div style={{paddingTop:80}}><div className="wrap" style={{maxWidth:760,padding:"40px 24px 60px"}}>
+    <button onClick={goHome} style={{background:"none",border:"none",color:"var(--ac)",fontSize:12,cursor:"pointer",fontFamily:"'DM Sans'",marginBottom:16}}>← Back to Home</button>
+    <h1 style={{fontFamily:"'Bricolage Grotesque'",fontSize:28,fontWeight:800,marginBottom:6}}>{title}</h1>
+    <div style={{width:40,height:3,background:"var(--ac)",borderRadius:2,marginBottom:24}}/>
+    <div style={{fontSize:14,color:"var(--t2)",lineHeight:1.8}}>{children}</div>
+  </div></div>);
+  const Sh=({children})=><h2 style={{fontSize:18,fontWeight:700,color:"var(--t1)",margin:"28px 0 10px",fontFamily:"'Bricolage Grotesque'"}}>{children}</h2>;
+  const Sh3=({children})=><h3 style={{fontSize:14,fontWeight:700,color:"var(--t1)",margin:"20px 0 6px"}}>{children}</h3>;
+  const P=({children})=><p style={{marginBottom:12}}>{children}</p>;
+
+  const PAGES={
+    about:()=><FooterPage title="About CostLens">
+      <P>CostLens is an AI-powered procurement costing platform built specifically for Indian manufacturing. We help procurement managers, cost engineers, and supply chain leaders make data-driven decisions by providing zero-based costing tools that were previously only available to large enterprises with Big 4 consulting budgets.</P>
+      <Sh>Our Story</Sh>
+      <P>CostLens was born from 25+ years of hands-on procurement experience in Indian manufacturing. After decades of building should-cost models in Excel, negotiating with hundreds of suppliers, and delivering crores in validated savings, we realized that every procurement team was reinventing the wheel — building the same templates, making the same costing errors, and lacking the analytical tools to negotiate from strength.</P>
+      <P>We built CostLens to democratize procurement intelligence. The same zero-based costing methodology used by the best procurement organizations in India — now available to every manufacturing company, from ₹50 Cr to ₹5,000 Cr turnover.</P>
+      <Sh>What We Believe</Sh>
+      <P><strong>Every rupee can be traced.</strong> In manufacturing procurement, cost is not a mystery — it's a science. Raw material, processing, overhead, logistics, margin — every component can be calculated, benchmarked, and optimized. CostLens gives you the tools to do this systematically.</P>
+      <P><strong>Indian manufacturing deserves Indian tools.</strong> Global costing platforms are built for European and American supply chains. They don't understand Ludhiana machine rates, JSW steel pricing, or how a Rajkot forging shop quotes. CostLens does — because we've lived it.</P>
+      <Sh>Our Team</Sh>
+      <P>Founded by procurement professionals with experience across bicycle manufacturing, automotive components, e-mobility, and industrial engineering. Our team combines deep domain expertise with modern AI capabilities to build tools that procurement managers actually want to use.</P>
+      <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:16,marginTop:16}}>
+        <div style={{fontSize:12,fontWeight:700,marginBottom:4}}>📍 Headquartered in Noida, Uttar Pradesh, India</div>
+        <div style={{fontSize:12,color:"var(--t3)"}}>Serving manufacturing companies across India</div>
+      </div>
+    </FooterPage>,
+
+    privacy:()=><FooterPage title="Privacy Policy">
+      <P><em>Last updated: February 2026</em></P>
+      <P>CostLens Technologies Pvt. Ltd. ("CostLens", "we", "us") is committed to protecting your privacy. This policy explains how we collect, use, and safeguard your information.</P>
+      <Sh>1. Information We Collect</Sh>
+      <Sh3>Account Information</Sh3>
+      <P>When you register, we collect your name, email address, and company name. This is used solely to create and manage your account.</P>
+      <Sh3>Usage Data</Sh3>
+      <P>We collect data about how you use CostLens — modules accessed, calculations performed, features used. This helps us improve the platform. We do not track individual costing data or supplier pricing entered by users.</P>
+      <Sh3>Uploaded Documents</Sh3>
+      <P>Documents uploaded for AI extraction (engineering drawings, quotations, ERP exports) are processed in real-time and are not stored permanently on our servers. Processed data is retained only in your account for your access.</P>
+      <Sh>2. How We Use Your Information</Sh>
+      <P>We use your information to: provide and improve CostLens services, communicate about your account and updates, generate anonymized and aggregated analytics (never individual data), comply with legal obligations.</P>
+      <Sh>3. Data Sharing</Sh>
+      <P><strong>We never sell your data.</strong> We never share your costing data, supplier information, or pricing with any third party — including your competitors, suppliers, or advertisers. Your commercial data is sacred to your business.</P>
+      <P>We may share anonymized, aggregated data (e.g., "average machine rates in Western India") for industry benchmarking purposes. This data cannot be traced back to any individual user or company.</P>
+      <Sh>4. Data Security</Sh>
+      <P>All data is encrypted in transit (256-bit SSL/TLS) and at rest (AES-256). Our infrastructure is hosted on enterprise-grade cloud servers with SOC 2 Type II compliance. Access to production data is restricted and logged.</P>
+      <Sh>5. Data Retention</Sh>
+      <P>Your account data is retained as long as your account is active. Upon account deletion, all personal data and saved analyses are permanently deleted within 30 days. Uploaded documents are automatically purged after AI processing.</P>
+      <Sh>6. Your Rights</Sh>
+      <P>You have the right to: access your personal data, export your saved analyses, correct inaccurate information, delete your account and all associated data, opt out of marketing communications.</P>
+      <Sh>7. Contact</Sh>
+      <P>For privacy inquiries: <strong>privacy@costlens.technology</strong></P>
+    </FooterPage>,
+
+    terms:()=><FooterPage title="Terms of Service">
+      <P><em>Last updated: February 2026</em></P>
+      <Sh>1. Acceptance of Terms</Sh>
+      <P>By accessing or using CostLens, you agree to these Terms of Service. CostLens is provided by CostLens Technologies Pvt. Ltd., registered in Noida, Uttar Pradesh, India.</P>
+      <Sh>2. Service Description</Sh>
+      <P>CostLens is a SaaS platform providing procurement costing tools, AI-powered extraction, analysis reports, and expert review services for manufacturing procurement professionals.</P>
+      <Sh>3. Account Responsibilities</Sh>
+      <P>You are responsible for maintaining the confidentiality of your login credentials and all activity under your account. You must provide accurate registration information. One person per account unless on a Team or Enterprise plan.</P>
+      <Sh>4. Subscription Plans</Sh>
+      <P>Starter plan is free with limited features. Professional and Team plans are billed monthly or annually as selected. Expert-reviewed reports are billed separately per engagement. All prices are in INR and exclusive of applicable GST (18%).</P>
+      <Sh>5. AI-Generated Results</Sh>
+      <P>AI-powered extractions and analyses are provided as decision-support tools and are not guaranteed to be error-free. Users should verify AI-generated results before using them in commercial negotiations or official reports. CostLens is not liable for decisions made based on AI outputs.</P>
+      <Sh>6. Expert Review Reports</Sh>
+      <P>Expert-reviewed reports are delivered within the stated turnaround time (24-48 hours). Reports represent professional analysis based on data provided. CostLens is not liable for incomplete analysis due to incomplete or inaccurate input data.</P>
+      <Sh>7. Intellectual Property</Sh>
+      <P>CostLens platform, templates, methodologies, and ebooks are intellectual property of CostLens Technologies Pvt. Ltd. Users retain full ownership of their data, analyses, and results generated using the platform.</P>
+      <Sh>8. Limitation of Liability</Sh>
+      <P>CostLens provides tools and analysis to support procurement decisions. We are not liable for any commercial losses arising from the use of our platform, including but not limited to: incorrect costing estimates, negotiation outcomes, or supplier disputes. Maximum liability is limited to fees paid in the preceding 12 months.</P>
+      <Sh>9. Governing Law</Sh>
+      <P>These terms are governed by the laws of India. Any disputes shall be subject to the exclusive jurisdiction of courts in Noida, Uttar Pradesh.</P>
+      <Sh>10. Contact</Sh>
+      <P>For legal inquiries: <strong>legal@costlens.technology</strong></P>
+    </FooterPage>,
+
+    refund:()=><FooterPage title="Refund Policy">
+      <P><em>Last updated: February 2026</em></P>
+      <Sh>Subscription Refunds</Sh>
+      <Sh3>Monthly Plans</Sh3>
+      <P>Monthly subscriptions can be cancelled anytime. No refunds for partial months. Your access continues until the end of the current billing period.</P>
+      <Sh3>Annual Plans</Sh3>
+      <P>Annual subscriptions come with a <strong>14-day money-back guarantee</strong>. If you're not satisfied within the first 14 days of purchase, contact us for a full refund — no questions asked. After 14 days, annual subscriptions are non-refundable but you retain access for the full year.</P>
+      <Sh3>Upgrades & Downgrades</Sh3>
+      <P>When upgrading from monthly to annual, the remaining monthly balance is prorated. When downgrading, the change takes effect at the next billing cycle.</P>
+      <Sh>Expert Report Refunds</Sh>
+      <P>If an expert-reviewed report is not delivered within the stated turnaround time, you are entitled to a full refund. If you are unsatisfied with the quality of an expert report, contact us within 7 days of delivery. We will either revise the report at no additional cost or issue a full refund.</P>
+      <Sh>How to Request a Refund</Sh>
+      <P>Email <strong>support@costlens.technology</strong> with your account email and reason. Refunds are processed within 5-7 business days to the original payment method.</P>
+      <Sh>Starter (Free) Plan</Sh>
+      <P>The Starter plan is free and requires no payment. There is nothing to refund.</P>
+    </FooterPage>,
+
+    contact:()=><FooterPage title="Contact Us">
+      <P>We'd love to hear from you — whether you have a question, feedback, or need help with your procurement challenges.</P>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,margin:"20px 0"}}>
+        {[
+          {icon:"📧",title:"General Inquiries",detail:"hello@costlens.technology",sub:"We respond within 24 hours"},
+          {icon:"🛠️",title:"Technical Support",detail:"support@costlens.technology",sub:"Professional: 48 hrs • Team: 24 hrs"},
+          {icon:"💼",title:"Enterprise & Partnerships",detail:"enterprise@costlens.technology",sub:"Custom plans, API access, bulk licensing"},
+          {icon:"📋",title:"Expert Reports",detail:"experts@costlens.technology",sub:"On-demand analysis & consulting"},
+        ].map((c,i)=><div key={i} style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:16}}>
+          <div style={{fontSize:22,marginBottom:6}}>{c.icon}</div>
+          <div style={{fontSize:13,fontWeight:700,marginBottom:2}}>{c.title}</div>
+          <div style={{fontSize:13,color:"var(--ac)",fontWeight:600,marginBottom:4}}>{c.detail}</div>
+          <div style={{fontSize:11,color:"var(--t3)"}}>{c.sub}</div>
+        </div>)}
+      </div>
+      <Sh>Office</Sh>
+      <P>CostLens Technologies Pvt. Ltd.<br/>Noida, Uttar Pradesh 201301, India</P>
+      <Sh>For Procurement Professionals</Sh>
+      <P>Want to see CostLens in action for your specific use case? We offer free 30-minute demos tailored to your industry — bicycle, automotive, FMCG, industrial, or engineering. Book a slot at <strong>demo@costlens.technology</strong></P>
+    </FooterPage>,
+
+    blog:()=><FooterPage title="Blog & Insights">
+      <P>Practical procurement knowledge from the field — not theory from textbooks.</P>
+      <div style={{display:"grid",gap:12,marginTop:16}}>
+        {[
+          {tag:"COST REDUCTION",title:"7 Procurement Levers That Actually Work in Indian Manufacturing",desc:"Beyond price negotiation — specification rationalization, VaVe, payment terms, volume consolidation, and more. Real examples with real numbers.",date:"Coming Soon"},
+          {tag:"SHOULD-COST",title:"How to Build a Should-Cost Model That Suppliers Respect",desc:"The difference between a should-cost that gets laughed at vs one that moves negotiations. Covers process sheets, machine rates, overhead allocation.",date:"Coming Soon"},
+          {tag:"CATEGORY MGMT",title:"Steel Procurement Strategy for Indian Manufacturers",desc:"HRC, CRC, CRCA, GP — understanding grades, mill vs trader sourcing, index-based pricing, and how to lock in the right price.",date:"Coming Soon"},
+          {tag:"AI IN PROCUREMENT",title:"Can AI Really Read Engineering Drawings? What We Learned",desc:"Honest assessment of AI extraction accuracy on Indian manufacturing drawings — what works, what doesn't, and how to get the best results.",date:"Coming Soon"},
+          {tag:"INVENTORY",title:"₹70 Crore Inventory, 68% Non-Moving: A Liquidation Playbook",desc:"Real-world case study of how a bicycle manufacturer tackled dead stock — identification, classification, and recovery strategies.",date:"Coming Soon"},
+          {tag:"BENCHMARKING",title:"What Should a VMC Operation Cost? India 2026 Rates",desc:"Comprehensive machine rate benchmarking — CNC turning, VMC, HMC, grinding, wire-cut across Pune, Rajkot, Ludhiana, Chennai, and Bangalore.",date:"Coming Soon"},
+        ].map((post,i)=><div key={i} style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:16,cursor:"pointer"}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+            <span style={{fontSize:8,fontWeight:700,color:"var(--ac)",background:"rgba(45,127,249,.08)",padding:"2px 8px",borderRadius:4,textTransform:"uppercase",letterSpacing:.5}}>{post.tag}</span>
+            <span style={{fontSize:10,color:"var(--t3)"}}>{post.date}</span>
+          </div>
+          <div style={{fontSize:14,fontWeight:700,color:"var(--t1)",marginBottom:4}}>{post.title}</div>
+          <div style={{fontSize:12,color:"var(--t2)",lineHeight:1.6}}>{post.desc}</div>
+        </div>)}
+      </div>
+      <div style={{background:"rgba(37,99,235,.04)",border:"1px solid rgba(37,99,235,.12)",borderRadius:10,padding:16,marginTop:20,textAlign:"center"}}>
+        <div style={{fontSize:13,fontWeight:700,color:"var(--ac)",marginBottom:4}}>📬 Get notified when new articles publish</div>
+        <div style={{fontSize:12,color:"var(--t2)"}}>Sign up for CostLens and we'll email you when new content drops — no spam, only procurement intelligence.</div>
+        <button className="btn-pri" style={{marginTop:10,fontSize:12}} onClick={()=>{setAuthMode("register");setShowAuth(true)}}>{BETA_CONFIG.enabled?"🧪 Join Beta →":"Sign Up Free →"}</button>
+      </div>
+    </FooterPage>,
+
+    security:()=><FooterPage title="Trust & Data Security">
+      <div style={{background:"rgba(16,185,129,.06)",border:"1px solid rgba(16,185,129,.2)",borderRadius:12,padding:20,marginBottom:20,textAlign:"center"}}>
+        <div style={{fontSize:28,marginBottom:8}}>🛡️</div>
+        <div style={{fontSize:16,fontWeight:800,marginBottom:4}}>Your procurement data is safe with CostLens</div>
+        <div style={{fontSize:12,color:"var(--t2)",lineHeight:1.6}}>Supplier pricing, cost breakdowns, spend data — we know this is among the most commercially sensitive information in your organization. Here's exactly how we protect it.</div>
+      </div>
+
+      <div className="trust-grid">
+        <div className="trust-stat"><div style={{fontSize:24,marginBottom:4}}>🔐</div><div style={{fontFamily:"IBM Plex Mono",fontSize:20,fontWeight:800,color:"var(--ac)"}}>Zero</div><div style={{fontSize:10,color:"var(--t3)"}}>Data Retention After Processing</div></div>
+        <div className="trust-stat"><div style={{fontSize:24,marginBottom:4}}>🚫</div><div style={{fontFamily:"IBM Plex Mono",fontSize:20,fontWeight:800,color:"var(--ac)"}}>Never</div><div style={{fontSize:10,color:"var(--t3)"}}>Used for AI Model Training</div></div>
+        <div className="trust-stat"><div style={{fontSize:24,marginBottom:4}}>🔒</div><div style={{fontFamily:"IBM Plex Mono",fontSize:20,fontWeight:800,color:"var(--ac)"}}>TLS 1.3</div><div style={{fontSize:10,color:"var(--t3)"}}>256-bit Encryption In Transit</div></div>
+        <div className="trust-stat"><div style={{fontSize:24,marginBottom:4}}>👁️</div><div style={{fontFamily:"IBM Plex Mono",fontSize:20,fontWeight:800,color:"var(--ac)"}}>No Human</div><div style={{fontSize:10,color:"var(--t3)"}}>Sees Your Raw Data</div></div>
+      </div>
+
+      <Sh>How Your Data Flows — Step by Step</Sh>
+      <div className="trust-card">
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          {[
+            {step:"1",icon:"📤",title:"You Upload",desc:"Your Excel/CSV file is loaded in YOUR BROWSER. Column mapping and data preview happen entirely client-side. Nothing leaves your device at this stage."},
+            {step:"2",icon:"🛡️",title:"Optional Anonymization",desc:"If enabled, supplier names are replaced with Supplier_001, Supplier_002, etc. IN YOUR BROWSER before anything is sent. The AI never sees your real supplier names."},
+            {step:"3",icon:"🔐",title:"Encrypted Transmission",desc:"Your mapped data is sent via HTTPS/TLS 1.3 (256-bit encryption) to the AI processing API. This is the same bank-grade encryption used by online banking and payment systems."},
+            {step:"4",icon:"🤖",title:"AI Processing",desc:"The AI analyzes your data in memory, generates the report, and returns the results. The data is NOT stored on any disk, NOT saved in any database, and NOT retained after the response is generated."},
+            {step:"5",icon:"📊",title:"Report Delivered",desc:"Your analysis report is rendered in your browser. The processed data and AI response exist only in your current browser session. Closing the tab erases everything."},
+          ].map((s,i)=><div key={i} style={{display:"flex",gap:12,alignItems:"flex-start"}}>
+            <div style={{width:32,height:32,borderRadius:"50%",background:"rgba(37,99,235,.08)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,flexShrink:0}}>{s.icon}</div>
+            <div><div style={{fontSize:13,fontWeight:700}}>{s.title}</div><div style={{fontSize:11,color:"var(--t2)",lineHeight:1.6}}>{s.desc}</div></div>
+          </div>)}
+        </div>
+      </div>
+
+      <Sh>CostLens vs. Pasting Data in ChatGPT/Claude</Sh>
+      <div className="trust-card" style={{overflowX:"auto"}}>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+          <thead><tr style={{borderBottom:"2px solid var(--s2)"}}>
+            <th style={{textAlign:"left",padding:"8px",fontSize:10,color:"var(--t3)"}}>Security Feature</th>
+            <th style={{textAlign:"center",padding:"8px",fontSize:10,color:"var(--err)"}}>ChatGPT / Claude Chat</th>
+            <th style={{textAlign:"center",padding:"8px",fontSize:10,color:"var(--ok)",fontWeight:800}}>CostLens</th>
+          </tr></thead>
+          <tbody>{[
+            ["Data used for training?","⚠️ May be used (free tier)","❌ Never — API zero-retention"],
+            ["Data stored on servers?","✅ Conversations saved","❌ Not stored after processing"],
+            ["Human reviewers see data?","⚠️ Possible for safety review","❌ No human access"],
+            ["Supplier name anonymization?","❌ No built-in option","✅ Client-side anonymization"],
+            ["Column mapping before AI?","❌ Raw paste, AI guesses","✅ Structured, validated mapping"],
+            ["NDA available?","❌ No","✅ Mutual NDA provided"],
+            ["Audit trail?","❌ No","✅ Timestamped processing log"],
+            ["India data residency?","❌ US servers","✅ Processing via India-preferred routing"],
+          ].map((row,i)=><tr key={i} style={{borderBottom:"1px solid var(--s2)"}}>
+            <td style={{padding:"8px",fontWeight:600}}>{row[0]}</td>
+            <td style={{padding:"8px",textAlign:"center"}}>{row[1]}</td>
+            <td style={{padding:"8px",textAlign:"center"}}>{row[2]}</td>
+          </tr>)}</tbody>
+        </table>
+      </div>
+
+      <Sh>Technical Security Measures</Sh>
+      <div className="trust-card">
+        {[
+          {t:"Encryption In Transit",d:"All data transmitted between your browser and CostLens is encrypted using TLS 1.3 with 256-bit encryption. Every API call, file upload, and page load is encrypted end-to-end."},
+          {t:"Zero Data Retention",d:"We use the Anthropic API which has a contractual zero-data-retention policy. Your procurement data is processed in memory only and is immediately discarded after analysis. It is never written to disk, database, or log files."},
+          {t:"No AI Training",d:"Your data is NEVER used to train, fine-tune, or improve any AI models. This is contractually guaranteed by our API provider's terms of service and our own data processing agreement."},
+          {t:"Client-Side Processing",d:"Column mapping, data preview, validation, and optional anonymization all happen entirely in your browser. The AI only receives pre-processed, structured data — not your raw files."},
+          {t:"Supplier Anonymization",d:"Our built-in anonymization replaces real supplier names with generic identifiers (Supplier_001, etc.) before the data leaves your browser. The AI produces the same analytical quality without seeing sensitive commercial relationships."},
+          {t:"No Persistent Storage",d:"CostLens does not store your uploaded files or processed data on any server. Your data exists only in your browser session and the temporary AI processing memory. Closing the tab or refreshing erases all data."},
+        ].map((item,i)=><div key={i} style={{padding:"10px 0",borderBottom:i<5?"1px solid var(--s2)":"none"}}>
+          <div style={{fontSize:12,fontWeight:700,marginBottom:3}}>🔐 {item.t}</div>
+          <div style={{fontSize:11,color:"var(--t2)",lineHeight:1.6}}>{item.d}</div>
+        </div>)}
+      </div>
+
+      <Sh>Compliance & Standards</Sh>
+      <div className="trust-card">
+        <P>CostLens follows SOC 2 Type II security practices and is designed for compliance with India's Digital Personal Data Protection Act, 2023 (DPDPA). We conduct regular vulnerability assessments and our infrastructure uses enterprise-grade cloud services with automatic failover, DDoS protection, and 99.9% uptime SLA.</P>
+      </div>
+
+      <Sh>Frequently Asked Questions — IT/Security Teams</Sh>
+      <div className="trust-card">
+        {[
+          {q:"Where does our data go when we upload a file?",a:"Your file is parsed in your browser. Only the mapped, structured data (and optionally anonymized) is sent via encrypted HTTPS to the AI API for analysis. The API processes it in memory and returns results. No data is stored on any server."},
+          {q:"Can CostLens employees see our supplier pricing data?",a:"No. CostLens personnel have no access to your uploaded data or analysis results. The data flows from your browser → encrypted API → back to your browser. There is no admin panel or database where your data is stored or viewable."},
+          {q:"Is the data used to train AI models?",a:"Absolutely not. We use the Anthropic Messages API which has a contractual zero-retention policy. Your data is never used for training, fine-tuning, or any purpose other than generating your specific analysis."},
+          {q:"What if we have a strict 'no cloud AI' policy?",a:"We understand. CostLens offers: (1) client-side anonymization so the AI never sees real supplier names, (2) an Expert Review option where a human analyst produces the report without AI processing of your data, and (3) we're building an on-premise deployment option for Enterprise customers."},
+          {q:"Can you sign our company's NDA?",a:"Yes, absolutely. We proactively offer a mutual NDA to every organization. You can digitally sign our standard NDA directly on this platform, or we're happy to review and sign your company's NDA template. Contact enterprise@costlens.technology."},
+          {q:"Do you have SOC 2 / ISO 27001 certification?",a:"We follow SOC 2 Type II practices and are on the certification roadmap. For Enterprise customers, we provide a detailed security questionnaire response and can arrange a call with our security team."},
+        ].map((faq,i)=><div key={i} style={{padding:"10px 0",borderBottom:i<5?"1px solid var(--s2)":"none"}}>
+          <div style={{fontSize:12,fontWeight:700,marginBottom:3,color:"var(--ac)"}}>{faq.q}</div>
+          <div style={{fontSize:11,color:"var(--t2)",lineHeight:1.6}}>{faq.a}</div>
+        </div>)}
+      </div>
+
+      <div id="nda-section" style={{scrollMarginTop:100}}>
+        <Sh>📋 Digital NDA — Sign Online</Sh>
+        <NDASignOff user={user}/>
+      </div>
+
+      <div style={{background:"rgba(37,99,235,.04)",border:"1px solid rgba(37,99,235,.12)",borderRadius:10,padding:16,marginTop:20,textAlign:"center"}}>
+        <div style={{fontSize:13,fontWeight:700,color:"var(--ac)",marginBottom:4}}>Need a custom security review?</div>
+        <div style={{fontSize:12,color:"var(--t2)"}}>For Enterprise security assessments, custom NDAs, or vendor risk questionnaires — contact <strong>enterprise@costlens.technology</strong></div>
+      </div>
+    </FooterPage>,
+
+    careers:()=><FooterPage title="Careers at CostLens">
+      <P>We're building the future of procurement intelligence for Indian manufacturing. If that excites you, read on.</P>
+      <Sh>Why CostLens?</Sh>
+      <P>We're solving a real problem for a massive market — India's manufacturing procurement runs into lakhs of crores annually, and most of it is still managed with Excel and gut feel. We're changing that with domain-specific AI tools built by people who actually understand procurement.</P>
+      <Sh>Open Positions</Sh>
+      {[
+        {role:"Procurement Analyst (Expert Reports)",type:"Full-time / Contract",loc:"Remote (India)",desc:"Review AI-generated procurement reports, add expert context, deliver polished client-ready analyses. 3+ years in manufacturing procurement required."},
+        {role:"Full-Stack Developer",type:"Full-time",loc:"Remote (India)",desc:"Build and scale the CostLens platform — React, Node.js, Python, AI integration. Startup pace, real impact."},
+        {role:"Content Writer — Procurement Domain",type:"Part-time / Freelance",loc:"Remote",desc:"Write practical, experience-backed procurement content — ebooks, blog posts, LinkedIn articles. Must understand manufacturing supply chains."},
+      ].map((j,i)=><div key={i} style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:16,marginBottom:10}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6,flexWrap:"wrap",gap:6}}>
+          <div style={{fontSize:14,fontWeight:700}}>{j.role}</div>
+          <div style={{display:"flex",gap:6}}><span style={{fontSize:9,background:"rgba(37,99,235,.08)",color:"var(--ac)",padding:"2px 8px",borderRadius:4,fontWeight:600}}>{j.type}</span><span style={{fontSize:9,background:"var(--bg)",color:"var(--t3)",padding:"2px 8px",borderRadius:4}}>{j.loc}</span></div>
+        </div>
+        <div style={{fontSize:12,color:"var(--t2)",lineHeight:1.6}}>{j.desc}</div>
+      </div>)}
+      <P>Interested? Send your resume and a short note about why CostLens excites you to <strong>careers@costlens.technology</strong></P>
+    </FooterPage>,
+  };
+
+  // ─── LANDING PAGE (not logged in) ───
+  if(!user)return(<div className={`CL ${theme}`}>
+    <style>{CSS}</style>{authModal}
+    <nav className="nav"><div className="wrap" style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+      <div className="nav-logo" onClick={goHome}><CLIcon size={24}/><span style={{marginLeft:4}}>Cost</span><span style={{color:"var(--ac)"}}>Lens</span></div>
+      <div style={{display:"flex",gap:20,alignItems:"center"}}>
+        <a className="nav-link" onClick={()=>{setLp("home");setTimeout(()=>document.getElementById("modules")?.scrollIntoView({behavior:"smooth"}),100)}}>Modules</a>
+        <a className="nav-link" onClick={()=>{setLp("home");setTimeout(()=>document.getElementById("ebooks")?.scrollIntoView({behavior:"smooth"}),100)}}>Ebooks</a>
+        <a className="nav-link" onClick={()=>{setLp("home");setTimeout(()=>document.getElementById("reports")?.scrollIntoView({behavior:"smooth"}),100)}}>Reports</a>
+        <a className="nav-link" onClick={()=>{setLp("home");setTimeout(()=>document.getElementById("ai-tools")?.scrollIntoView({behavior:"smooth"}),100)}}>AI Tools</a>
+        <a className="nav-link" onClick={()=>{setLp("home");setTimeout(()=>document.getElementById("commodity")?.scrollIntoView({behavior:"smooth"}),100)}}>Commodity AI</a>
+        <a className="nav-link" onClick={()=>{setLp("home");setTimeout(()=>document.getElementById("pricing")?.scrollIntoView({behavior:"smooth"}),100)}}>Pricing</a>
+        <a className="nav-link" onClick={()=>{setLp("security");window.scrollTo(0,0)}} style={{color:"var(--ok)"}}>🔒 Trust</a>
+        <button className="btn-pri" style={{fontSize:12,padding:"7px 16px"}} onClick={()=>{setAuthMode("login");setShowAuth(true)}}>Login</button>
+        <button className="btn-pri" style={{fontSize:12,padding:"7px 16px",background:BETA_CONFIG.enabled?"#7c3aed":"#10b981"}} onClick={()=>{setAuthMode("register");setShowAuth(true)}}>{BETA_CONFIG.enabled?"🧪 Join Beta":"Sign Up Free"}</button>
+        <button onClick={toggleTheme} style={{background:"none",border:"1px solid var(--s3)",borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:14,lineHeight:1}} title="Toggle theme">{theme==="dark"?"☀️":"🌙"}</button>
+      </div>
+    </div></nav>
+    {/* FOOTER PAGES */}
+    {lp!=="home"&&PAGES[lp]?PAGES[lp]():(<>
+    {/* HERO with Animated Cost Breakup */}
+    <HeroSection onSignup={()=>{setAuthMode("register");setShowAuth(true)}} />
+    {BETA_CONFIG.enabled&&<div style={{background:"linear-gradient(90deg,#7c3aed,#2563eb)",padding:"8px 16px",textAlign:"center",position:"relative",marginTop:-8}}>
+      <span style={{fontSize:11,color:"#fff",fontWeight:600}}>🧪 Private Beta — Invite-only access for 10 procurement professionals • Full Pro features • {betaDaysLeft()} days remaining</span>
+    </div>}
+    {/* MODULES */}
+    <section id="modules" style={{padding:"60px 0",borderTop:"1px solid var(--s2)"}}><div className="wrap">
+      <div className="badge">13 Costing Modules</div>
+      <h2 style={{fontFamily:"'Bricolage Grotesque',sans-serif",fontSize:32,fontWeight:800,marginBottom:6}}>One platform. Every procurement cost.</h2>
+      <p style={{fontSize:14,color:"var(--t2)",marginBottom:24,maxWidth:650}}>From raw material to landed cost, from tooling amortization to total cost of ownership — 13 specialized modules cover the full procurement costing spectrum.</p>
+
+      {/* HOW IT WORKS - 3 STEP */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))",gap:16,marginBottom:32}}>
+        {[
+          {step:"1",icon:"📝",title:"Enter or Upload",desc:"Fill in the form manually, or upload a drawing/quotation — AI extracts BOM, specs, and process data automatically",color:"#3b82f6"},
+          {step:"2",icon:"🤖",title:"AI Calculates",desc:"Zero-based costing engine builds the cost from first principles — material weight × rate, cycle time × MHR, overhead, logistics, margin",color:"#10b981"},
+          {step:"3",icon:"📊",title:"Negotiate with Data",desc:"Get a detailed cost breakdown showing exactly where the supplier's price is justified — and where it isn't. Walk into negotiations armed.",color:"#f59e0b"},
+        ].map((s,i)=><div key={i} style={{position:"relative",background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:12,padding:20,textAlign:"center"}}>
+          <div style={{position:"absolute",top:-1,left:30,right:30,height:2,background:s.color,opacity:.5}}/>
+          <div style={{width:32,height:32,borderRadius:"50%",background:s.color,color:"#fff",display:"inline-flex",alignItems:"center",justifyContent:"center",fontSize:14,fontWeight:800,marginBottom:8}}>{s.step}</div>
+          <div style={{fontSize:24,marginBottom:6}}>{s.icon}</div>
+          <div style={{fontSize:14,fontWeight:700,marginBottom:4}}>{s.title}</div>
+          <div style={{fontSize:11,color:"var(--t2)",lineHeight:1.6}}>{s.desc}</div>
+        </div>)}
+      </div>
+
+      {/* BEFORE vs AFTER */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr auto 1fr",gap:12,alignItems:"stretch",marginBottom:32,maxWidth:700,margin:"0 auto 32px"}}>
+        <div style={{background:"rgba(239,68,68,.04)",border:"1px solid rgba(239,68,68,.15)",borderRadius:10,padding:16}}>
+          <div style={{fontSize:11,fontWeight:700,color:"var(--err)",textTransform:"uppercase",marginBottom:8}}>❌ Without CostLens</div>
+          {["Supplier says ₹480 — you negotiate blind","Excel templates built from scratch every time","No idea if quoted price covers real cost or 40% margin","'Market rate' is whatever the supplier tells you","CBS analysis takes 2-3 hours per component"].map((t,i)=><div key={i} style={{fontSize:11,color:"var(--t2)",padding:"4px 0",display:"flex",gap:6,alignItems:"flex-start"}}><span style={{color:"var(--err)",flexShrink:0}}>•</span>{t}</div>)}
+        </div>
+        <div style={{display:"flex",alignItems:"center",fontSize:24}}>→</div>
+        <div style={{background:"rgba(16,185,129,.04)",border:"1px solid rgba(16,185,129,.15)",borderRadius:10,padding:16}}>
+          <div style={{fontSize:11,fontWeight:700,color:"var(--ok)",textTransform:"uppercase",marginBottom:8}}>✅ With CostLens</div>
+          {["AI says fair range ₹340–390 — you negotiate from data","13 ready-to-use modules with 50+ templates","Zero-based cost breakdown: material ₹149 + process ₹35 + OH ₹28","Machine rates, material rates — India-specific benchmarks built in","Should-cost in 30 seconds with AI extraction from drawings"].map((t,i)=><div key={i} style={{fontSize:11,color:"var(--t2)",padding:"4px 0",display:"flex",gap:6,alignItems:"flex-start"}}><span style={{color:"var(--ok)",flexShrink:0}}>✓</span>{t}</div>)}
+        </div>
+      </div>
+
+      {/* FOUR CATEGORIES */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:12,marginBottom:20}}>
+        {[
+          {cat:"🏭 Manufacturing",mods:["Should-Cost Analysis","Tool/Die/Mould Cost","Machine Hour Rates"],desc:"Zero-based costing from first principles — material, conversion, overhead. The core of procurement cost engineering.",color:"#3b82f6"},
+          {cat:"🚚 Logistics & Trade",mods:["Landed Cost Calculator","Total Cost of Ownership","Make vs Buy Analysis"],desc:"See the REAL cost beyond unit price — freight, duty, holding cost, quality cost, total lifecycle economics.",color:"#10b981"},
+          {cat:"💰 Capital & Projects",mods:["CAPEX Analysis","EPC Project Costing","ROI Calculator"],desc:"From machine investment decisions to full EPC project budgets — capital allocation backed by data.",color:"#f59e0b"},
+          {cat:"📊 Benchmarking",mods:["CBS Analyzer","VaVe Analysis","Commodity Index","Volume Discount"],desc:"Compare, benchmark, and optimize — cost breakdown validation, value engineering, index-linked pricing.",color:"#a78bfa"},
+        ].map((c,i)=><div key={i} style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:12,padding:16,borderTop:`3px solid ${c.color}`}}>
+          <div style={{fontSize:15,fontWeight:700,marginBottom:6}}>{c.cat}</div>
+          <div style={{fontSize:11,color:"var(--t2)",lineHeight:1.6,marginBottom:10}}>{c.desc}</div>
+          {c.mods.map((m,mi)=><div key={mi} style={{fontSize:11,padding:"3px 0",color:"var(--t1)"}}>→ {m}</div>)}
+        </div>)}
+      </div>
+
+      {/* MODULE CARDS */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:10}}>{MODS.map(m=><div key={m.id} style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:14,cursor:"pointer",transition:"all .3s"}} onClick={()=>{setAuthMode("register");setShowAuth(true)}}>
+        <div style={{fontSize:9,color:"var(--t3)",textTransform:"uppercase",letterSpacing:1}}>{m.cat}</div>
+        <div style={{display:"flex",alignItems:"center",gap:6,margin:"4px 0"}}><span style={{fontSize:20}}>{m.icon}</span><span style={{fontSize:12,fontWeight:700}}>{m.name}</span></div>
+        <div style={{fontSize:10,color:"var(--t2)"}}>{m.desc}</div>
+      </div>)}</div>
+      <div style={{textAlign:"center",marginTop:20}}><button className="btn-pri" style={{fontSize:15,padding:"12px 28px"}} onClick={()=>{setAuthMode("register");setShowAuth(true)}}>{BETA_CONFIG.enabled?"🧪 Join Private Beta →":"Start Using All 13 Modules — Free →"}</button></div>
+    </div></section>
+    {/* EBOOKS */}
+    <section id="ebooks" style={{padding:"60px 0",borderTop:"1px solid var(--s2)"}}><div className="wrap">
+      <div className="badge">Free Resources</div>
+      <h2 style={{fontFamily:"'Bricolage Grotesque',sans-serif",fontSize:32,fontWeight:800,marginBottom:6}}>Procurement Excellence Series</h2>
+      <p style={{fontSize:14,color:"var(--t2)",marginBottom:8,maxWidth:600}}>10 ebooks written by procurement professionals with 25+ years of Indian manufacturing experience. Not theory — real frameworks you can implement Monday morning. Preview free, full download on Professional plan.</p>
+
+      {/* WHAT'S INSIDE */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))",gap:10,marginBottom:24}}>
+        {[
+          {icon:"📋",title:"Ready-to-Use Templates",desc:"Approval formats, CBS templates, negotiation trackers, vendor scorecards — copy-paste into your organization"},
+          {icon:"📊",title:"Real Indian Case Studies",desc:"Examples from bicycle manufacturing, auto components, forging, CNC machining — ₹ figures, not $ theory"},
+          {icon:"🎯",title:"Step-by-Step Playbooks",desc:"100-day cost reduction program, vendor negotiation scripts, category strategy frameworks — proven in practice"},
+        ].map((f,i)=><div key={i} style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:14}}>
+          <div style={{fontSize:20,marginBottom:4}}>{f.icon}</div>
+          <div style={{fontSize:12,fontWeight:700,marginBottom:3}}>{f.title}</div>
+          <div style={{fontSize:11,color:"var(--t2)",lineHeight:1.5}}>{f.desc}</div>
+        </div>)}
+      </div>
+
+      <div style={{display:"flex",gap:14,overflowX:"auto",paddingBottom:12}}>{EBOOKS.map(b=><div key={b.id} style={{flexShrink:0,cursor:"pointer"}} onClick={()=>{setAuthMode("register");setShowAuth(true)}}><EbookCover book={b} size="md"/></div>)}</div>
+
+      {/* SOCIAL PROOF */}
+      <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:16,marginTop:16,display:"flex",gap:20,alignItems:"center",flexWrap:"wrap",justifyContent:"center"}}>
+        {[["1,200+","Downloads"],["4.8/5","Average Rating"],["10","Books"],["25+","Years of Experience"]].map(([v,l],i)=><div key={i} style={{textAlign:"center",minWidth:80}}>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:18,fontWeight:700,color:"var(--ac)"}}>{v}</div>
+          <div style={{fontSize:9,color:"var(--t3)",textTransform:"uppercase"}}>{l}</div>
+        </div>)}
+      </div>
+
+      <div style={{textAlign:"center",marginTop:16}}><button className="btn-pri" onClick={()=>{setAuthMode("register");setShowAuth(true)}}>Sign Up to Download All — Free →</button></div>
+    </div></section>
+    {/* ANALYSIS REPORTS */}
+    <section id="reports" style={{padding:"60px 0",borderTop:"1px solid var(--s2)"}}><div className="wrap">
+      <div className="badge" style={{color:"var(--warn)",background:"rgba(245,158,11,.08)",borderColor:"rgba(245,158,11,.2)"}}>On-Demand Reports</div>
+      <h2 style={{fontFamily:"'Bricolage Grotesque',sans-serif",fontSize:32,fontWeight:800,marginBottom:6}}>Your ERP Data is a Goldmine. We Help You Mine It.</h2>
+      <p style={{fontSize:14,color:"var(--t2)",marginBottom:24,maxWidth:650}}>Every ERP system is sitting on thousands of rows of procurement data that nobody has time to analyze. Upload it — get board-ready insights in minutes, not weeks.</p>
+
+      {/* HOW IT WORKS */}
+      <div style={{display:"flex",gap:8,alignItems:"center",justifyContent:"center",marginBottom:28,flexWrap:"wrap"}}>
+        {[
+          {icon:"📤",label:"Upload ERP Export",sub:"SAP, Oracle, Tally — Excel or CSV"},
+          {icon:"🔄",label:"AI Maps Columns",sub:"Smart detection, you verify"},
+          {icon:"🤖",label:"AI Analyzes",sub:"Patterns, outliers, savings"},
+          {icon:"📊",label:"Get Report",sub:"Findings + actions + emails"},
+        ].map((s,i)=><React.Fragment key={i}>
+          <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:"12px 16px",textAlign:"center",minWidth:120}}>
+            <div style={{fontSize:22}}>{s.icon}</div>
+            <div style={{fontSize:11,fontWeight:700,marginTop:4}}>{s.label}</div>
+            <div style={{fontSize:9,color:"var(--t3)"}}>{s.sub}</div>
+          </div>
+          {i<3&&<div style={{fontSize:18,color:"var(--t3)"}}>→</div>}
+        </React.Fragment>)}
+      </div>
+
+      {/* WHAT EACH REPORT TELLS YOU */}
+      <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:12,padding:20,marginBottom:24}}>
+        <div style={{fontSize:13,fontWeight:700,marginBottom:12}}>What these reports answer for you:</div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:8}}>
+          {[
+            ["🔍 Spend Analysis","Where is my money going? Who are my top suppliers? Where is my maverick spend? What's my Pareto?"],
+            ["📉 Price Variance","Which suppliers raised prices? Is it commodity-justified or padding? What's my P&L exposure?"],
+            ["📦 Inventory Health","How much dead stock am I sitting on? What's my ITR? How much working capital is blocked?"],
+            ["⭐ Supplier Scorecard","Who's delivering on time? Who has quality issues? Who should I grow vs phase out?"],
+            ["🎯 Category Opportunity","Which categories have the most savings potential? What lever works where? Quick wins?"],
+            ["📋 Savings Pipeline","Am I on track to hit my savings target? What's stuck? What's the forecast?"],
+            ["✅ Savings Validation","Are my claimed savings real? Will the CFO accept these numbers? Hard vs soft?"],
+            ["⚠️ Supplier Risk","Where am I single-sourced? What if Pune floods? Which suppliers are financially fragile?"],
+          ].map(([title,q],i)=><div key={i} style={{padding:"8px 10px",borderRadius:6,background:"var(--bg)",border:"1px solid var(--s2)"}}>
+            <div style={{fontSize:11,fontWeight:700,marginBottom:2}}>{title}</div>
+            <div style={{fontSize:10,color:"var(--t2)",lineHeight:1.5,fontStyle:"italic"}}>{q}</div>
+          </div>)}
+        </div>
+      </div>
+
+      {/* EVERY REPORT COMES WITH */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:10,marginBottom:24}}>
+        {[
+          {icon:"📌",title:"Executive Summary",desc:"Top findings in 3 bullets — ready for your MD in 30 seconds"},
+          {icon:"📊",title:"Key Metrics",desc:"The numbers that matter — with trend arrows and benchmarks"},
+          {icon:"🔍",title:"Top Findings",desc:"Ranked by ₹ impact — what to fix first and how"},
+          {icon:"💡",title:"Recommendations",desc:"Specific actions with timeline, effort, and expected savings"},
+          {icon:"⚡",title:"Quick Wins",desc:"Things you can do in the next 30 days for immediate impact"},
+          {icon:"📧",title:"Smart Actions",desc:"One-click AI emails — supplier letters, management updates, follow-ups"},
+        ].map((f,i)=><div key={i} style={{background:"rgba(245,158,11,.03)",border:"1px solid rgba(245,158,11,.12)",borderRadius:8,padding:12,textAlign:"center"}}>
+          <div style={{fontSize:18}}>{f.icon}</div>
+          <div style={{fontSize:11,fontWeight:700,marginTop:4}}>{f.title}</div>
+          <div style={{fontSize:10,color:"var(--t2)",marginTop:2}}>{f.desc}</div>
+        </div>)}
+      </div>
+
+      {/* REPORT CARDS */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(230px,1fr))",gap:10}}>{REPORTS.map(r=><div key={r.id} style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:14,borderLeft:"3px solid var(--warn)",cursor:"pointer"}} onClick={()=>{setAuthMode("register");setShowAuth(true)}}>
+        <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}><span style={{fontSize:18}}>{r.icon}</span><span style={{fontSize:12,fontWeight:700}}>{r.name}</span></div>
+        <div style={{fontSize:10,color:"var(--t2)",marginBottom:6,lineHeight:1.5}}>{r.desc}</div>
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:10}}><span style={{color:"var(--ac)"}}>⚡ AI: {r.credits} credits</span><span style={{color:"var(--warn)"}}>👨‍💼 {r.expertPrice}</span></div>
+      </div>)}</div>
+
+      {/* TWO TIERS */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginTop:20,maxWidth:600,margin:"20px auto 0"}}>
+        <div style={{background:"rgba(59,130,246,.04)",border:"1px solid rgba(59,130,246,.15)",borderRadius:10,padding:16,textAlign:"center"}}>
+          <div style={{fontSize:22}}>🤖</div>
+          <div style={{fontSize:13,fontWeight:700,marginTop:4}}>AI Instant</div>
+          <div style={{fontSize:11,color:"var(--t2)",marginTop:4}}>Upload → Results in 3-5 minutes. Uses AI credits. Perfect for regular analysis and quick decisions.</div>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:14,fontWeight:700,color:"var(--ac)",marginTop:8}}>2-3 credits</div>
+        </div>
+        <div style={{background:"rgba(245,158,11,.04)",border:"1px solid rgba(245,158,11,.15)",borderRadius:10,padding:16,textAlign:"center"}}>
+          <div style={{fontSize:22}}>👨‍💼</div>
+          <div style={{fontSize:13,fontWeight:700,marginTop:4}}>Expert Review</div>
+          <div style={{fontSize:11,color:"var(--t2)",marginTop:4}}>A procurement expert validates findings, adds market context, and delivers a board-ready PDF in 24-48 hours.</div>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:14,fontWeight:700,color:"var(--warn)",marginTop:8}}>₹8K–25K</div>
+        </div>
+      </div>
+
+      <div style={{textAlign:"center",marginTop:20}}><button className="btn-pri" style={{background:"var(--warn)"}} onClick={()=>{setAuthMode("register");setShowAuth(true)}}>Get Started — Upload Your Data →</button></div>
+      <div style={{fontSize:9,color:"var(--t3)",marginTop:8,fontStyle:"italic",textAlign:"center"}}>⚠️ {AI_DISCLAIMER}</div>
+    </div></section>
+    {/* AI COMMERCIAL TOOLS */}
+    <section id="ai-tools" style={{padding:"60px 0",borderTop:"1px solid var(--s2)",background:"linear-gradient(180deg,transparent 0%,rgba(59,130,246,.03) 50%,transparent 100%)"}}>
+    <div className="wrap">
+      <div style={{textAlign:"center",marginBottom:20}}>
+        <div className="badge" style={{color:"var(--ac)",background:"rgba(59,130,246,.08)",borderColor:"rgba(59,130,246,.2)"}}>NEW — AI Commercial Tools</div>
+        <h2 style={{fontFamily:"'Bricolage Grotesque',sans-serif",fontSize:32,fontWeight:800,marginBottom:6}}>Your AI Procurement Analyst. On Demand.</h2>
+        <p style={{fontSize:14,color:"var(--t2)",maxWidth:600,margin:"0 auto"}}>Six powerful AI tools that handle the commercial tasks eating up your team's time — quotation analysis, contract review, price validation, RFQ comparison, negotiation strategy, and AMC/service quotation comparison.</p>
+      </div>
+      <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:14,padding:20,marginBottom:28,maxWidth:750,margin:"0 auto 28px"}}>
+        <div style={{fontSize:13,fontWeight:700,marginBottom:12,textAlign:"center"}}>A Typical Tuesday in Procurement — With CostLens</div>
+        <div style={{display:"grid",gap:8}}>
+          {[
+            {time:"9:00 AM",icon:"💲",event:"New quotation lands in inbox — ₹4,800/pc for motor housing",action:"Run Price Check → AI says 'HIGH by 22%' → Fair range ₹3,400–3,900",result:"You now know the target. Save 30 mins of manual benchmarking.",color:"#10b981"},
+            {time:"10:30 AM",icon:"📜",event:"Legal sends supplier contract for review — 38 pages",action:"Upload to Contract Analyzer → AI flags 4 risky clauses, 3 missing clauses in 45 seconds",result:"Catch an auto-renewal trap + missing LD clause before signing. Save ₹50K legal review.",color:"#f43f5e"},
+            {time:"2:00 PM",icon:"📊",event:"5 vendors submitted RFQ responses — need to present comparison tomorrow",action:"Upload all 5 PDFs → AI creates normalized techno-commercial matrix with rankings",result:"2 days of Excel work done in 5 minutes. Board-ready comparison with recommendation.",color:"#6366f1"},
+            {time:"4:00 PM",icon:"🎯",event:"Negotiation with Tata Steel tomorrow — ₹12 Cr annual spend",action:"Generate Negotiation Brief → AI builds strategy: 3 leverage points, concession plan, talking points",result:"Walk in with a McKinsey-grade strategy brief. One-click meeting request drafted.",color:"#f59e0b"},
+            {time:"5:00 PM",icon:"📑",event:"Vendor sends 12-page quotation with drawing — need quick analysis",action:"Upload quotation + drawing → AI benchmarks every line item, flags overpricing, spots missing terms",result:"Counter-quotation email drafted with data. ₹2.8L savings identified in 2 minutes vs 3 hours manual.",color:"#0891b2"},
+            {time:"5:30 PM",icon:"🔧",event:"3 housekeeping AMC quotes received — need to evaluate L1 genuineness",action:"Upload RFP + all 3 quotes → AI normalizes scope, checks compliance, flags underbidding risks",result:"L1 vendor flagged for below-minimum wages. Quality-adjusted recommendation saves ₹4.8L/yr in hidden costs.",color:"#7c3aed"},
+          ].map((s,i)=><div key={i} style={{display:"grid",gridTemplateColumns:"70px 1fr",gap:12,padding:"10px 12px",borderRadius:8,background:"var(--bg)",border:"1px solid var(--s2)"}}>
+            <div style={{textAlign:"center"}}>
+              <div style={{fontSize:18}}>{s.icon}</div>
+              <div style={{fontSize:10,fontWeight:700,color:"var(--ac)",marginTop:2}}>{s.time}</div>
+            </div>
+            <div>
+              <div style={{fontSize:12,fontWeight:600,marginBottom:3}}>{s.event}</div>
+              <div style={{fontSize:10,color:s.color,marginBottom:2}}>→ {s.action}</div>
+              <div style={{fontSize:10,color:"var(--t3)",fontStyle:"italic"}}>{s.result}</div>
+            </div>
+          </div>)}
+        </div>
+        <div style={{textAlign:"center",marginTop:12,fontSize:12,fontWeight:700,color:"var(--ac)"}}>Total time saved: ~3 days. Total value protected: ~₹12–18 Lakhs. Credits used: 12.</div>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:16}}>
+        <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:14,padding:20,position:"relative",overflow:"hidden"}}>
+          <div style={{position:"absolute",top:0,left:0,right:0,height:3,background:"linear-gradient(90deg,#10b981,#3b82f6)"}}/>
+          <div style={{fontSize:32,marginBottom:8}}>💲</div>
+          <div style={{fontSize:15,fontWeight:700,marginBottom:4}}>Price Reasonableness Check</div>
+          <div style={{fontSize:11,color:"var(--t2)",lineHeight:1.6,marginBottom:12}}>Enter any item + supplier price → AI instantly tells you if it's fair, high, or low. Get cost breakdown estimate, benchmark range, and negotiation leverage.</div>
+          <div style={{background:"rgba(16,185,129,.06)",border:"1px solid rgba(16,185,129,.12)",borderRadius:8,padding:10,marginBottom:10}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+              <span style={{fontSize:10,color:"var(--t3)"}}>Example: CNC Housing, 2.3kg Aluminum</span>
+              <span style={{fontSize:10,fontWeight:700,color:"var(--warn)",background:"rgba(245,158,11,.1)",padding:"2px 8px",borderRadius:10}}>⚠️ HIGH</span>
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between",fontSize:11}}>
+              <span style={{color:"var(--t2)"}}>Quoted: <span style={{fontFamily:"IBM Plex Mono",fontWeight:700,color:"var(--err)",textDecoration:"line-through"}}>₹480</span></span>
+              <span style={{color:"var(--t2)"}}>Fair: <span style={{fontFamily:"IBM Plex Mono",fontWeight:700,color:"var(--ok)"}}>₹340–₹390</span></span>
+            </div>
+          </div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span style={{fontSize:10,fontFamily:"IBM Plex Mono",color:"var(--ok)",fontWeight:600}}>🎁 2 FREE checks</span>
+            <span style={{fontSize:10,color:"var(--t3)"}}>Then 1 credit</span>
+          </div>
+        </div>
+        <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:14,padding:20,position:"relative",overflow:"hidden"}}>
+          <div style={{position:"absolute",top:0,left:0,right:0,height:3,background:"linear-gradient(90deg,#f43f5e,#f59e0b)"}}/>
+          <div style={{fontSize:32,marginBottom:8}}>📜</div>
+          <div style={{fontSize:15,fontWeight:700,marginBottom:4}}>Contract Clause Analyzer</div>
+          <div style={{fontSize:11,color:"var(--t2)",lineHeight:1.6,marginBottom:12}}>Upload any supplier contract PDF → AI extracts every clause, flags risks, identifies missing protections, and suggests amendments. Replaces ₹50K legal review.</div>
+          <div style={{background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:8,padding:10,marginBottom:10}}>
+            <div style={{fontSize:10,fontWeight:700,marginBottom:6}}>AI Found in 45 seconds:</div>
+            <div style={{display:"flex",flexDirection:"column",gap:4}}>
+              <div style={{display:"flex",alignItems:"center",gap:6,fontSize:10}}><span style={{color:"var(--ok)"}}>✅</span><span style={{color:"var(--t2)"}}>8 favorable clauses</span></div>
+              <div style={{display:"flex",alignItems:"center",gap:6,fontSize:10}}><span style={{color:"var(--err)"}}>🚩</span><span style={{color:"var(--t2)"}}>3 risky clauses <span style={{fontWeight:700,color:"var(--err)"}}>(auto-renewal trap!)</span></span></div>
+              <div style={{display:"flex",alignItems:"center",gap:6,fontSize:10}}><span style={{color:"var(--warn)"}}>⚠️</span><span style={{color:"var(--t2)"}}>5 missing clauses (no LD, no price revision)</span></div>
+            </div>
+          </div>
+          <div style={{textAlign:"right"}}><span style={{fontSize:10,color:"var(--t3)"}}>3 credits per analysis</span></div>
+        </div>
+        <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:14,padding:20,position:"relative",overflow:"hidden"}}>
+          <div style={{position:"absolute",top:0,left:0,right:0,height:3,background:"linear-gradient(90deg,#6366f1,#8b5cf6)"}}/>
+          <div style={{fontSize:32,marginBottom:8}}>📊</div>
+          <div style={{fontSize:15,fontWeight:700,marginBottom:4}}>RFQ Response Comparator</div>
+          <div style={{fontSize:11,color:"var(--t2)",lineHeight:1.6,marginBottom:12}}>Upload 2-5 supplier quotations (any format) → AI normalizes into one comparison matrix with techno-commercial ranking. 2-3 days of work in 5 minutes.</div>
+          <div style={{background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:8,padding:10,marginBottom:10}}>
+            <div style={{fontSize:10,fontWeight:700,marginBottom:6}}>Normalized Comparison:</div>
+            {[["Vendor A (Pune)","₹235","95","✅"],["Vendor B (Rajkot)","₹248","88",""],["Vendor C (China)","₹198","72",""]].map(([n,p,s,w],i)=><div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"3px 0",borderBottom:i<2?"1px solid var(--s2)":"none",fontSize:10}}>
+              <span style={{color:"var(--t2)",flex:1}}>{n}</span>
+              <span style={{fontFamily:"IBM Plex Mono",fontWeight:600,width:50,textAlign:"right"}}>{p}</span>
+              <span style={{fontFamily:"IBM Plex Mono",fontWeight:600,width:40,textAlign:"right",color:Number(s)>90?"var(--ok)":"var(--t2)"}}>{s}/100</span>
+              <span style={{width:20,textAlign:"center"}}>{w}</span>
+            </div>)}
+          </div>
+          <div style={{textAlign:"right"}}><span style={{fontSize:10,color:"var(--t3)"}}>3 credits per comparison</span></div>
+        </div>
+        <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:14,padding:20,position:"relative",overflow:"hidden"}}>
+          <div style={{position:"absolute",top:0,left:0,right:0,height:3,background:"linear-gradient(90deg,#f59e0b,#10b981)"}}/>
+          <div style={{fontSize:32,marginBottom:8}}>🎯</div>
+          <div style={{fontSize:15,fontWeight:700,marginBottom:4}}>Negotiation Prep Brief</div>
+          <div style={{fontSize:11,color:"var(--t2)",lineHeight:1.6,marginBottom:12}}>Enter supplier context → AI generates a 1-page strategy brief with leverage analysis, opening position, concession plan, talking points, and Plan B. Like a McKinsey consultant in 2 minutes.</div>
+          <div style={{background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:8,padding:10,marginBottom:10}}>
+            <div style={{fontSize:10,fontWeight:700,marginBottom:6}}>Your Strategy Brief includes:</div>
+            <div style={{display:"flex",flexDirection:"column",gap:3}}>
+              {["💪 3 leverage points ranked by strength","🎯 Opening position + walk-away price","🔄 Concession plan (give X, get Y)","🗣️ Talking points with counter-arguments","🚫 Red lines — what NOT to concede"].map((t,i)=><div key={i} style={{fontSize:10,color:"var(--t2)"}}>{t}</div>)}
+            </div>
+          </div>
+          <div style={{textAlign:"right"}}><span style={{fontSize:10,color:"var(--t3)"}}>2 credits per brief</span></div>
+        </div>
+        <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:14,padding:20,position:"relative",overflow:"hidden"}}>
+          <div style={{position:"absolute",top:0,left:0,right:0,height:3,background:"linear-gradient(90deg,#0891b2,#6366f1)"}}/>
+          <div style={{fontSize:32,marginBottom:8}}>📑</div>
+          <div style={{fontSize:15,fontWeight:700,marginBottom:4}}>Vendor Quotation Analysis</div>
+          <div style={{fontSize:11,color:"var(--t2)",lineHeight:1.6,marginBottom:12}}>Upload any vendor quotation — with or without drawings & specs. AI benchmarks every line item, flags overpricing, spots missing terms, and gives you negotiation ammunition. Works for any industry, any component.</div>
+          <div style={{background:"rgba(8,145,178,.06)",border:"1px solid rgba(8,145,178,.12)",borderRadius:8,padding:10,marginBottom:10}}>
+            <div style={{fontSize:10,fontWeight:700,marginBottom:6}}>AI Analysis in 60 seconds:</div>
+            <div style={{display:"flex",flexDirection:"column",gap:4}}>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:10}}><span style={{color:"var(--t2)"}}>Quoted Total:</span><span style={{fontFamily:"IBM Plex Mono",fontWeight:700,color:"var(--err)"}}>₹4,82,000</span></div>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:10}}><span style={{color:"var(--t2)"}}>Fair Range:</span><span style={{fontFamily:"IBM Plex Mono",fontWeight:700,color:"var(--ok)"}}>₹3,60,000–₹4,10,000</span></div>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:10}}><span style={{color:"var(--t2)"}}>Savings Potential:</span><span style={{fontFamily:"IBM Plex Mono",fontWeight:700,color:"var(--ac)"}}>₹72,000–₹1.2L</span></div>
+              <div style={{fontSize:9,color:"var(--warn)",marginTop:2}}>⚠ 3 overpriced items flagged • 2 commercial terms missing • LD clause absent</div>
+            </div>
+          </div>
+          <div style={{textAlign:"right"}}><span style={{fontSize:10,color:"var(--t3)"}}>2 credits per analysis</span></div>
+        </div>
+        <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:14,padding:20,position:"relative",overflow:"hidden"}}>
+          <div style={{position:"absolute",top:0,left:0,right:0,height:3,background:"linear-gradient(90deg,#7c3aed,#2563eb)"}}/>
+          <div style={{fontSize:32,marginBottom:8}}>🔧</div>
+          <div style={{fontSize:15,fontWeight:700,marginBottom:4}}>AMC / Service Quotation Comparator</div>
+          <div style={{fontSize:11,color:"var(--t2)",lineHeight:1.6,marginBottom:12}}>Upload RFP/RFQ + all vendor service quotations → AI normalizes scope, compares manpower costs, checks statutory compliance, assesses L1 genuineness, and provides negotiation strategy.</div>
+          <div style={{background:"rgba(124,58,237,.06)",border:"1px solid rgba(124,58,237,.12)",borderRadius:8,padding:10,marginBottom:10}}>
+            <div style={{fontSize:10,fontWeight:700,marginBottom:6}}>AI L1 Assessment:</div>
+            <div style={{display:"flex",flexDirection:"column",gap:4}}>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:10}}><span style={{color:"var(--t2)"}}>L1 (ABC Facility):</span><span style={{fontFamily:"IBM Plex Mono",fontWeight:700,color:"var(--warn)"}}>₹32.8L/yr ⚠️</span></div>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:10}}><span style={{color:"var(--t2)"}}>L2 (CleanPro) — Recommended:</span><span style={{fontFamily:"IBM Plex Mono",fontWeight:700,color:"var(--ok)"}}>₹38.4L/yr ✅</span></div>
+              <div style={{fontSize:9,color:"var(--err)",marginTop:2}}>⚠ L1 flagged: 4 roles below min wage • pest control missing • no CLRA license</div>
+            </div>
+          </div>
+          <div style={{textAlign:"right"}}><span style={{fontSize:10,color:"var(--t3)"}}>3 credits per comparison</span></div>
+        </div>
+      </div>
+      <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:12,padding:20,marginTop:24,maxWidth:700,margin:"24px auto 0"}}>
+        <div style={{textAlign:"center",marginBottom:12}}>
+          <span style={{fontSize:13,fontWeight:700}}>⚡ Smart Actions — From Insight to Action in One Click</span>
+          <div style={{fontSize:11,color:"var(--t2)",marginTop:4}}>Every AI tool result comes with intelligent next steps:</div>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:8}}>
+          {[["📧 Auto-Draft Emails","Price reduction requests, amendment letters, award & regret letters — AI writes them using your analysis data"],
+            ["🔗 Cross-Tool Linking","Price Check → CBS Request → Negotiation Brief. Each tool connects to the next logical step"],
+            ["📊 Management Updates","One-click executive summary emails with key findings and recommended actions"]
+          ].map(([t,d],i)=><div key={i} style={{padding:10,borderRadius:8,background:"var(--bg)",border:"1px solid var(--s2)"}}>
+            <div style={{fontSize:11,fontWeight:600,marginBottom:3}}>{t}</div>
+            <div style={{fontSize:10,color:"var(--t3)",lineHeight:1.5}}>{d}</div>
+          </div>)}
+        </div>
+      </div>
+      <div style={{textAlign:"center",marginTop:24}}>
+        <button className="btn-pri" style={{fontSize:15,padding:"12px 32px"}} onClick={()=>{setAuthMode("register");setShowAuth(true)}}>Try Price Check Free →</button>
+        <div style={{fontSize:11,color:"var(--t3)",marginTop:8}}>2 free price checks on Starter plan • No credit card required</div>
+        <div style={{fontSize:9,color:"var(--t3)",marginTop:6,fontStyle:"italic"}}>⚠️ {AI_DISCLAIMER}</div>
+      </div>
+    </div></section>
+    {/* COMMODITY INTELLIGENCE */}
+    <section id="commodity" style={{padding:"60px 0",borderTop:"1px solid var(--s2)"}}>
+      <div className="wrap">
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+          <div className="badge" style={{color:"#10b981",background:"rgba(16,185,129,.08)",borderColor:"rgba(16,185,129,.2)",margin:0}}>Live Intelligence</div>
+          <span style={{fontSize:9,padding:"3px 10px",borderRadius:10,background:"var(--ac)",color:"#fff",fontWeight:700}}>PROFESSIONAL</span>
+        </div>
+        <h2 style={{fontFamily:"'Bricolage Grotesque',sans-serif",fontSize:32,fontWeight:800,marginBottom:6,color:"var(--t1)"}}>AI-Powered Commodity Watchlist</h2>
+        <p style={{fontSize:14,color:"var(--t2)",marginBottom:24}}>Real-time market intelligence for 15 procurement commodities. AI searches live prices, generates BUY/WAIT/HOLD signals with negotiation scripts.</p>
+        <div style={{background:"linear-gradient(135deg,#0a1628,#111827)",border:"1px solid var(--s3)",borderRadius:20,padding:32,position:"relative",overflow:"hidden"}}>
+          <div style={{position:"absolute",top:0,left:0,right:0,height:4,background:"linear-gradient(90deg,#10b981,#3b82f6,#f59e0b,#ef4444)"}}/>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:24,alignItems:"start"}}>
+            <div>
+              <div style={{fontSize:16,fontWeight:700,color:"#e2e8f0",marginBottom:12}}>Your Procurement Command Center</div>
+              <div style={{display:"grid",gap:8}}>
+                {[{ic:"🔩",t:"Ferrous Metals",d:"Steel HRC, CRC, GP — SIAM/JSW/TATA indices"},{ic:"⚡",t:"Non-Ferrous",d:"Aluminum, Copper, Zinc, Brass — LME/MCX rates"},{ic:"🧪",t:"Polymers",d:"PP, HDPE, ABS — RIL/IOCL/SABIC pricing"},{ic:"🌿",t:"Rubber & Specialty",d:"RSS4, SBR, SS304, Crude Brent"}].map((item,i)=>
+                  <div key={i} style={{display:"flex",gap:10,alignItems:"flex-start"}}>
+                    <span style={{fontSize:20}}>{item.ic}</span>
+                    <div><div style={{fontSize:13,fontWeight:600,color:"#e2e8f0"}}>{item.t}</div><div style={{fontSize:11,color:"#94a3b8"}}>{item.d}</div></div>
+                  </div>
+                )}
+              </div>
+            </div>
+            <div>
+              <div style={{fontSize:16,fontWeight:700,color:"#e2e8f0",marginBottom:12}}>What You Get Per Commodity</div>
+              <div style={{display:"grid",gap:6}}>
+                {[{ic:"📊",t:"BUY / WAIT / HOLD Signal",d:"AI decision with confidence level"},{ic:"💰",t:"Savings Impact",d:"₹ quantified based on YOUR volume"},{ic:"📝",t:"Negotiation Script",d:"Exact words for supplier meetings"},{ic:"📋",t:"Contract Clause",d:"Index-linked pricing formula"},{ic:"⚡",t:"Smart Actions",d:"Generate emails, briefs, cost calcs, alerts"},{ic:"🔍",t:"Live Web Search",d:"Current prices from SIAM, LME, MCX, RIL"}].map((f,i)=>
+                  <div key={i} style={{display:"flex",gap:8,alignItems:"center",padding:"5px 0"}}>
+                    <span style={{fontSize:14}}>{f.ic}</span>
+                    <div><span style={{fontSize:12,fontWeight:600,color:"#e2e8f0"}}>{f.t}</span> <span style={{fontSize:11,color:"#94a3b8"}}>— {f.d}</span></div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+          <div style={{display:"flex",gap:8,marginTop:20,flexWrap:"wrap",justifyContent:"center"}}>
+            {["BUY","WAIT","HOLD"].map((s,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:10,background:s==="BUY"?"rgba(16,185,129,.1)":s==="WAIT"?"rgba(239,68,68,.1)":"rgba(245,158,11,.1)",border:"1px solid "+(s==="BUY"?"rgba(16,185,129,.3)":s==="WAIT"?"rgba(239,68,68,.3)":"rgba(245,158,11,.3)")}}>
+              <span style={{width:8,height:8,borderRadius:"50%",background:s==="BUY"?"#10b981":s==="WAIT"?"#ef4444":"#f59e0b"}}/>
+              <span style={{fontSize:11,fontWeight:700,color:s==="BUY"?"#10b981":s==="WAIT"?"#ef4444":"#f59e0b"}}>{s==="BUY"?"Lock in prices now":s==="WAIT"?"Prices expected to drop":"Monitor — no action needed"}</span>
+            </div>)}
+          </div>
+        </div>
+        <div style={{textAlign:"center",marginTop:16}}>
+          <button className="btn-pri" style={{fontSize:14,padding:"12px 32px"}} onClick={()=>{setAuthMode("register");setShowAuth(true)}}>⚡ Start Professional Plan — ₹1,999/mo</button>
+          <div style={{fontSize:10,color:"var(--t3)",marginTop:6}}>Commodity Intelligence included with Professional plan</div>
+          <div style={{fontSize:9,color:"var(--t3)",marginTop:4,fontStyle:"italic"}}>⚠️ {AI_DISCLAIMER}</div>
+        </div>
+      </div>
+    </section>
+    {/* WHO IS THIS FOR + TRUST */}
+    <section style={{padding:"60px 0",borderTop:"1px solid var(--s2)"}}>
+    <div className="wrap">
+      <div style={{textAlign:"center",marginBottom:24}}>
+        <div className="badge">Built For</div>
+        <h2 style={{fontFamily:"'Bricolage Grotesque',sans-serif",fontSize:32,fontWeight:800,marginBottom:6}}>Who Uses CostLens?</h2>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:12,marginBottom:32}}>
+        {[
+          {role:"🏭 Procurement Managers",desc:"Running ₹50–500 Cr annual spend. Negotiating daily with 50+ suppliers. Need data to justify every decision to management.",use:"Should-cost models, price checks, CBS analysis — stop negotiating blind."},
+          {role:"📊 Cost Engineers",desc:"Building cost models for new parts, validating supplier quotations, supporting VaVe projects. The backbone of procurement intelligence.",use:"Zero-based costing modules, tool cost estimation, MHR databases — your digital workbench."},
+          {role:"👔 CPOs / Procurement Heads",desc:"Leading teams of 5-20 buyers. Owning ₹100–1000 Cr category spend. Reporting savings to the board quarterly.",use:"Analysis reports, savings validation, category strategy, team dashboards — your command center."},
+          {role:"🔧 Supply Chain Leaders",desc:"Balancing cost, quality, delivery, and risk. Managing 200+ SKUs across multiple plants. Inventory optimization is a daily battle.",use:"TCO analysis, inventory health, supplier scorecards, make-vs-buy — holistic supply chain economics."},
+        ].map((p,i)=><div key={i} style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:12,padding:16}}>
+          <div style={{fontSize:15,fontWeight:700,marginBottom:6}}>{p.role}</div>
+          <div style={{fontSize:11,color:"var(--t2)",lineHeight:1.6,marginBottom:8}}>{p.desc}</div>
+          <div style={{fontSize:11,color:"var(--ac)",lineHeight:1.6,padding:"8px 10px",background:"rgba(59,130,246,.04)",borderRadius:6,border:"1px solid rgba(59,130,246,.1)"}}>→ {p.use}</div>
+        </div>)}
+      </div>
+
+      {/* INDUSTRY FIT */}
+      <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:12,padding:20,marginBottom:24}}>
+        <div style={{fontSize:13,fontWeight:700,marginBottom:12,textAlign:"center"}}>🏗️ Industries We Serve</div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap",justifyContent:"center"}}>
+          {["Bicycle Manufacturing","Automotive Components","Electric Vehicles","Forging & Casting","CNC / Precision Engineering","Sheet Metal & Fabrication","Plastics & Injection Moulding","Electrical & Electronics","Textile Machinery","General Engineering"].map((ind,i)=>
+            <span key={i} style={{fontSize:11,padding:"6px 14px",background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:20,color:"var(--t2)"}}>{ind}</span>
+          )}
+        </div>
+      </div>
+
+      {/* NUMBERS STRIP */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))",gap:12}}>
+        {[
+          {val:"13",label:"Costing Modules",sub:"Every cost type covered"},
+          {val:"8",label:"Analysis Reports",sub:"Upload data → insights"},
+          {val:"6",label:"AI Commercial Tools",sub:"Quotation, Contract, RFQ, Price, Negotiate, AMC"},
+          {val:"50+",label:"Templates",sub:"Ready to use, India-specific"},
+          {val:"22",label:"Smart Action Emails",sub:"One-click drafts from results"},
+          {val:"₹0",label:"To Start",sub:"No credit card required"},
+        ].map((n,i)=><div key={i} style={{textAlign:"center",padding:14,background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10}}>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:22,fontWeight:700,color:"var(--ac)"}}>{n.val}</div>
+          <div style={{fontSize:11,fontWeight:600,marginTop:2}}>{n.label}</div>
+          <div style={{fontSize:9,color:"var(--t3)"}}>{n.sub}</div>
+        </div>)}
+      </div>
+    </div></section>
+
+    {/* PRICING */}
+    <section id="pricing" style={{padding:"60px 0",borderTop:"1px solid var(--s2)"}}><div className="wrap" style={{textAlign:"center"}}>
+      <div className="badge">Pricing</div><h2 style={{fontFamily:"'Bricolage Grotesque',sans-serif",fontSize:32,fontWeight:800,marginBottom:6}}>A fraction of what consultants charge for a single analysis.</h2>
+      <p style={{fontSize:14,color:"var(--t2)",marginBottom:24}}>One should-cost negotiation typically saves ₹50K–5L. Your subscription pays for itself with the first analysis.</p>
+      {BETA_CONFIG.enabled&&<div style={{background:"linear-gradient(90deg,rgba(124,58,237,.06),rgba(37,99,235,.06))",border:"1px solid rgba(124,58,237,.2)",borderRadius:10,padding:12,maxWidth:600,margin:"0 auto 20px"}}>
+        <div style={{fontSize:12,fontWeight:700,color:"#7c3aed"}}>🧪 Beta Testers get full Professional plan FREE for {BETA_CONFIG.durationDays} days</div>
+        <div style={{fontSize:11,color:"var(--t2)"}}>50 AI credits • All reports • All tools • All modules — no payment required during beta</div>
+      </div>}
+      {/* Price Cards — 4 tiers */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,maxWidth:920,margin:"0 auto 30px"}}>
+        {[
+          {n:"Starter",p:"₹0",d:"Free forever",tag:"",btn:"Start Free",pri:false,sub:"For individual exploration",feat:["All 13 modules","50+ templates","Unlimited manual entry","Last 5 saved analyses"]},
+          {n:"Professional",p:"₹1,999",d:"/month",tag:"MOST POPULAR",btn:"Start Professional →",pri:true,sub:"For procurement managers",feat:["Everything in Starter","50 AI extractions/mo","10 AI reports/mo","Commodity Intelligence","Unlimited history + PDF"],ann:"₹19,999/year — save 17%"},
+          {n:"Team",p:"₹4,999",d:"/month (5 users)",tag:"",btn:"Start Team Plan",pri:false,sub:"For procurement teams",feat:["Everything in Professional","5 user accounts","Team dashboard","Priority support (24hr)"],ann:"₹49,999/year — save 17%"},
+          {n:"Enterprise",p:"Custom",d:"Tailored to your org",tag:"",btn:"Request Demo →",pri:false,sub:"For large organizations",feat:["Unlimited users & AI","SSO / LDAP integration","2 expert reports/quarter","Dedicated success manager"]},
+        ].map((t,i)=><div key={i} style={{background:"var(--s1)",border:t.pri?"2px solid var(--ac)":"1px solid var(--s2)",borderRadius:14,padding:"18px 14px",textAlign:"center",position:"relative"}}>
+          {t.tag&&<div style={{position:"absolute",top:-10,left:"50%",transform:"translateX(-50%)",background:"var(--ac)",color:"#fff",fontSize:8,fontWeight:700,padding:"3px 12px",borderRadius:10,letterSpacing:.8,whiteSpace:"nowrap"}}>{t.tag}</div>}
+          <div style={{fontFamily:"'Bricolage Grotesque'",fontSize:14,fontWeight:700,marginTop:t.tag?4:0}}>{t.n}</div>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:26,fontWeight:800,color:"var(--ac)",margin:"6px 0"}}>{t.p}</div>
+          <div style={{fontSize:10,color:"var(--t3)",marginBottom:4}}>{t.d}</div>
+          <div style={{fontSize:10,color:"var(--t2)",marginBottom:8,fontStyle:"italic"}}>{t.sub}</div>
+          {t.feat.map((f,j)=><div key={j} style={{fontSize:10,color:"var(--t2)",padding:"2px 0",textAlign:"left"}}>✓ {f}</div>)}
+          {t.ann&&<div style={{fontSize:9,color:"var(--ok)",marginTop:6,fontWeight:600}}>{t.ann}</div>}
+          <button className={t.pri?"btn-pri":"btn-sec"} style={{width:"100%",marginTop:10,fontSize:11}} onClick={()=>{setAuthMode("register");setShowAuth(true)}}>{t.btn}</button>
+        </div>)}
+      </div>
+      {/* Anchor comparison */}
+      <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:"14px 20px",maxWidth:700,margin:"0 auto 24px",display:"flex",justifyContent:"space-around",alignItems:"center",flexWrap:"wrap",gap:8}}>
+        <div style={{textAlign:"center"}}><div style={{fontSize:9,color:"var(--t3)",textTransform:"uppercase",letterSpacing:.5}}>Consulting firm</div><div style={{fontFamily:"IBM Plex Mono",fontSize:18,fontWeight:700,color:"var(--err)",textDecoration:"line-through"}}>₹3–8 Lakhs</div><div style={{fontSize:9,color:"var(--t3)"}}>per spend analysis</div></div>
+        <div style={{fontSize:20,color:"var(--t3)"}}>vs</div>
+        <div style={{textAlign:"center"}}><div style={{fontSize:9,color:"var(--t3)",textTransform:"uppercase",letterSpacing:.5}}>CostLens Professional</div><div style={{fontFamily:"IBM Plex Mono",fontSize:18,fontWeight:700,color:"var(--ok)"}}> ₹19,999/year</div><div style={{fontSize:9,color:"var(--ok)"}}>unlimited analyses</div></div>
+        <div style={{fontSize:20,color:"var(--t3)"}}>= </div>
+        <div style={{textAlign:"center"}}><div style={{fontSize:9,color:"var(--t3)",textTransform:"uppercase",letterSpacing:.5}}>You save</div><div style={{fontFamily:"IBM Plex Mono",fontSize:18,fontWeight:700,color:"var(--ac)"}}> 95%+</div><div style={{fontSize:9,color:"var(--t3)"}}>on every analysis</div></div>
+      </div>
+      {/* Detailed Comparison Table — 4 columns */}
+      <div style={{maxWidth:920,margin:"0 auto",textAlign:"left"}}>
+        <h3 style={{fontSize:16,fontWeight:700,marginBottom:14,textAlign:"center"}}>Detailed Feature Comparison</h3>
+        <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:12,overflow:"hidden"}}>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+            <thead><tr style={{borderBottom:"2px solid var(--s2)"}}>
+              <th style={{textAlign:"left",padding:"10px 14px",fontSize:11,fontWeight:700,color:"var(--t2)",width:"36%"}}>Feature</th>
+              <th style={{textAlign:"center",padding:"10px 6px",fontSize:10,fontWeight:700,width:"16%"}}>Starter</th>
+              <th style={{textAlign:"center",padding:"10px 6px",fontSize:10,fontWeight:700,color:"var(--ac)",width:"16%",background:"rgba(45,127,249,.04)"}}>Professional</th>
+              <th style={{textAlign:"center",padding:"10px 6px",fontSize:10,fontWeight:700,width:"16%"}}>Team</th>
+              <th style={{textAlign:"center",padding:"10px 6px",fontSize:10,fontWeight:700,width:"16%"}}>Enterprise</th>
+            </tr></thead>
+            <tbody>
+              {(()=>{const allRows=[
+                {cat:"PRICING"},
+                {f:"Monthly price",s:"₹0",p:"₹1,999/mo",t:"₹4,999/mo",e:"Custom"},
+                {f:"Annual price (save 17%)",s:"₹0",p:"₹19,999/yr",t:"₹49,999/yr",e:"Custom"},
+                {f:"Per-user/month (annual)",s:"₹0",p:"₹1,667",t:"₹833",e:"Custom"},
+                {cat:"COSTING MODULES"},
+                {f:"All 13 costing modules",s:"✅",p:"✅",t:"✅",e:"✅"},
+                {f:"Should-Cost / zero-based costing",s:"✅",p:"✅",t:"✅",e:"✅"},
+                {f:"Tool/Die/Mould costing (20 templates)",s:"✅",p:"✅",t:"✅",e:"✅"},
+                {f:"TCO, Landed Cost, Make-Buy, CBS, VaVe",s:"✅",p:"✅",t:"✅",e:"✅"},
+                {f:"EPC Project Costing",s:"✅",p:"✅",t:"✅",e:"✅"},
+                {f:"Custom module configuration",s:"—",p:"—",t:"—",e:"✅"},
+                {cat:"TEMPLATES & DATA ENTRY"},
+                {f:"50+ pre-built templates",s:"✅",p:"✅",t:"✅",e:"✅"},
+                {f:"Unlimited manual data entry",s:"✅",p:"✅",t:"✅",e:"✅"},
+                {f:"Custom company templates",s:"—",p:"—",t:"✅",e:"✅"},
+                {cat:"AI-POWERED FEATURES"},
+                {f:"AI extraction from drawings/docs",s:"—",p:"50/month",t:"50/user/mo",e:"Unlimited"},
+                {f:"AI analysis reports",s:"—",p:"10/month",t:"10/user/mo",e:"Unlimited"},
+                {f:"AI VaVe suggestions",s:"—",p:"✅",t:"✅",e:"✅"},
+                {f:"AI cost breakdown from quotations",s:"—",p:"✅",t:"✅",e:"✅"},
+                {cat:"ON-DEMAND ANALYSIS REPORTS"},
+                {f:"Spend Analysis",s:"—",p:"3 credits",t:"3 credits",e:"✅ Included"},
+                {f:"Price Variance Report",s:"—",p:"2 credits",t:"2 credits",e:"✅ Included"},
+                {f:"Inventory Health Analysis",s:"—",p:"2 credits",t:"2 credits",e:"✅ Included"},
+                {f:"Supplier Scorecard",s:"—",p:"2 credits",t:"2 credits",e:"✅ Included"},
+                {f:"Category Opportunity Analysis",s:"—",p:"3 credits",t:"3 credits",e:"✅ Included"},
+                {f:"Savings Validation (CFO-ready)",s:"—",p:"3 credits",t:"3 credits",e:"✅ Included"},
+                {f:"Supplier Risk Heat Map",s:"—",p:"2 credits",t:"2 credits",e:"✅ Included"},
+                {f:"Expert-reviewed reports",s:"Pay per use",p:"Pay per use",t:"20% off",e:"2 included/qtr"},
+                {cat:"COMMODITY INTELLIGENCE"},
+                {f:"AI Commodity Watchlist (15 commodities)",s:"—",p:"✅",t:"✅",e:"✅"},
+                {f:"Live web search for current prices",s:"—",p:"✅",t:"✅",e:"✅"},
+                {f:"BUY/WAIT/HOLD signals",s:"—",p:"✅",t:"✅",e:"✅"},
+                {f:"Negotiation scripts & contract clauses",s:"—",p:"✅",t:"✅",e:"✅"},
+                {f:"Smart Actions (email, brief, calc, alert)",s:"—",p:"✅",t:"✅",e:"✅"},
+                {f:"Volume-based savings quantification",s:"—",p:"✅",t:"✅",e:"✅"},
+                {cat:"EXPORT & HISTORY"},
+                {f:"View results on screen",s:"✅",p:"✅",t:"✅",e:"✅"},
+                {f:"Save analysis history",s:"Last 5",p:"Unlimited",t:"Unlimited",e:"Unlimited"},
+                {f:"PDF export / print",s:"—",p:"✅",t:"✅",e:"✅"},
+                {f:"Bulk export (Excel)",s:"—",p:"—",t:"✅",e:"✅"},
+                {cat:"KNOWLEDGE & RESOURCES"},
+                {f:"Contextual help guides",s:"✅",p:"✅",t:"✅",e:"✅"},
+                {f:"10 procurement ebooks",s:"Preview",p:"Full PDF ✅",t:"Full PDF ✅",e:"Full PDF ✅"},
+                {f:"Industry benchmark data",s:"Basic",p:"Detailed",t:"Detailed",e:"Custom"},
+                {cat:"TEAM & SUPPORT"},
+                {f:"User accounts",s:"1",p:"1",t:"5",e:"Unlimited"},
+                {f:"Team dashboard",s:"—",p:"—",t:"✅",e:"✅"},
+                {f:"Support response time",s:"Community",p:"48 hrs",t:"24 hrs",e:"4 hrs"},
+                {f:"Onboarding session",s:"—",p:"—",t:"1 hour",e:"Full setup"},
+                {f:"API access",s:"—",p:"—",t:"—",e:"✅"},
+                {f:"SSO / LDAP",s:"—",p:"—",t:"—",e:"✅"},
+              ];const cutoff=15;const visible=showAllFeatures?allRows:allRows.slice(0,cutoff);return visible.map((row,i)=>row.cat?
+                <tr key={i}><td colSpan={5} style={{padding:"10px 14px 4px",fontSize:9,fontWeight:700,color:"var(--t3)",textTransform:"uppercase",letterSpacing:1,borderTop:i>0?"2px solid var(--s2)":"none"}}>{row.cat}</td></tr>
+                :<tr key={i} style={{borderBottom:"1px solid var(--s2)"}}>
+                  <td style={{padding:"6px 14px",color:"var(--t1)",fontSize:11}}>{row.f}</td>
+                  {[row.s,row.p,row.t,row.e].map((v,j)=><td key={j} style={{textAlign:"center",padding:"6px 4px",fontSize:10,background:j===1?"rgba(45,127,249,.03)":"transparent",color:v==="—"?"var(--t3)":v==="✅"?"var(--ok)":"var(--t2)",fontWeight:v!=="—"&&v!=="✅"?600:400}}>{v}</td>)}
+                </tr>
+              )})()}
+            </tbody>
+          </table>
+        </div>
+        {!showAllFeatures&&<button onClick={()=>setShowAllFeatures(true)} style={{width:"100%",padding:"12px",background:"var(--s1)",border:"1px solid var(--s2)",borderTop:"none",borderRadius:"0 0 12px 12px",cursor:"pointer",fontFamily:"'DM Sans'",fontSize:12,fontWeight:600,color:"var(--ac)",display:"flex",alignItems:"center",justifyContent:"center",gap:6,transition:"all .2s"}}>Show all 45 features — AI Reports, Export, Support & more ▼</button>}
+        {showAllFeatures&&<button onClick={()=>setShowAllFeatures(false)} style={{width:"100%",padding:"10px",background:"transparent",border:"none",cursor:"pointer",fontFamily:"'DM Sans'",fontSize:11,color:"var(--t3)",marginTop:6}}>Collapse comparison ▲</button>}
+        <div style={{textAlign:"center",marginTop:20}}>
+          <button className="btn-pri" style={{fontSize:14,padding:"12px 32px"}} onClick={()=>{setAuthMode("register");setShowAuth(true)}}>{BETA_CONFIG.enabled?"🧪 Join Private Beta →":"Start Free — No Credit Card Required →"}</button>
+          <div style={{fontSize:10,color:"var(--t3)",marginTop:6}}>Upgrade anytime from inside the platform • Cancel anytime</div>
+        </div>
+      </div>
+    </div></section>
+    {/* AI DISCLAIMER */}
+    <div style={{background:"var(--s1)",borderTop:"1px solid var(--s2)",padding:"14px 20px",textAlign:"center"}}>
+      <div style={{fontSize:10,color:"var(--t3)",maxWidth:700,margin:"0 auto",lineHeight:1.6}}>⚠️ {AI_DISCLAIMER} CostLens is not liable for decisions made based on AI outputs. Expert-reviewed reports are subject to separate terms.</div>
+    </div>
+
+    {/* ═══ NEWSLETTER SECTION ═══ */}
+    <section style={{padding:"60px 0",borderTop:"1px solid var(--s2)",background:"linear-gradient(180deg,rgba(59,130,246,.02) 0%,rgba(124,58,237,.03) 100%)"}}>
+    <div className="wrap" style={{maxWidth:800,margin:"0 auto"}}>
+      <div style={{textAlign:"center",marginBottom:32}}>
+        <div style={{display:"inline-flex",alignItems:"center",gap:8,background:"rgba(59,130,246,.08)",border:"1px solid rgba(59,130,246,.15)",borderRadius:20,padding:"5px 14px",marginBottom:14}}>
+          <span style={{fontSize:14}}>📧</span>
+          <span style={{fontSize:11,fontWeight:700,color:"var(--ac)"}}>Free Weekly Newsletter</span>
+        </div>
+        <h2 style={{fontFamily:"'Bricolage Grotesque',sans-serif",fontSize:30,fontWeight:800,marginBottom:6}}>The Procurement Edge</h2>
+        <p style={{fontSize:14,color:"var(--t2)",maxWidth:560,margin:"0 auto",lineHeight:1.7}}>
+          One email every Thursday. Real procurement insights, not consultant fluff. Zero-based costing tips, negotiation scripts, Indian market data, and cost engineering frameworks — from 25+ years on the ground.
+        </p>
+      </div>
+
+      {/* What You Get */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:14,marginBottom:28}}>
+        {[
+          {icon:"💡",title:"Weekly Insight",desc:"One actionable procurement idea you can use on Monday morning. Real examples, real ₹ figures."},
+          {icon:"📊",title:"Market Data",desc:"Steel, aluminum, polymer price trends. India-specific benchmarks. What's moving and why."},
+          {icon:"🎯",title:"Playbook Sneak Peek",desc:"Templates, checklists, negotiation scripts — exclusive previews before they hit the platform."},
+        ].map((c,i)=>
+          <div key={i} style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:16,textAlign:"center"}}>
+            <div style={{fontSize:24,marginBottom:8}}>{c.icon}</div>
+            <div style={{fontSize:12,fontWeight:700,marginBottom:6}}>{c.title}</div>
+            <div style={{fontSize:11,color:"var(--t2)",lineHeight:1.6}}>{c.desc}</div>
+          </div>
+        )}
+      </div>
+
+      {/* Signup Form */}
+      <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:14,padding:24,textAlign:"center"}}>
+        {nlStatus==="success" ? (
+          <div>
+            <div style={{fontSize:36,marginBottom:10}}>🎉</div>
+            <div style={{fontSize:16,fontWeight:700,marginBottom:6}}>You're in!</div>
+            <div style={{fontSize:13,color:"var(--t2)",lineHeight:1.6}}>Check your inbox for a welcome email. First issue drops this Thursday.<br/>Meanwhile, explore the platform — 13 costing modules, free forever.</div>
+            <button className="btn-pri" style={{marginTop:14,fontSize:13,padding:"10px 24px"}} onClick={()=>{setAuthMode("register");setShowAuth(true)}}>Explore CostLens Free →</button>
+          </div>
+        ) : (
+          <>
+            <div style={{display:"flex",gap:10,maxWidth:500,margin:"0 auto",marginBottom:12}}>
+              <input
+                type="email"
+                placeholder="Your work email address"
+                value={nlEmail}
+                onChange={e=>setNlEmail(e.target.value)}
+                onKeyDown={e=>{if(e.key==="Enter"&&nlEmail.includes("@")){setNlStatus("success")}}}
+                style={{flex:1,padding:"12px 16px",borderRadius:8,border:"1px solid var(--s2)",background:"var(--bg)",color:"var(--t1)",fontFamily:"'DM Sans'",fontSize:13,outline:"none"}}
+              />
+              <button
+                className="btn-pri"
+                style={{fontSize:13,padding:"12px 22px",whiteSpace:"nowrap"}}
+                onClick={()=>{if(!nlEmail.includes("@")){setNlStatus("error");return}setNlStatus("success")}}
+              >Subscribe Free →</button>
+            </div>
+            {nlStatus==="error"&&<div style={{fontSize:11,color:"var(--err)",marginBottom:6}}>Please enter a valid email address</div>}
+            <div style={{fontSize:10,color:"var(--t3)"}}>Join 1,200+ procurement professionals. No spam, unsubscribe anytime. We respect your inbox.</div>
+          </>
+        )}
+      </div>
+
+      {/* Social Proof */}
+      <div style={{display:"flex",justifyContent:"center",gap:20,marginTop:20,flexWrap:"wrap"}}>
+        {[
+          {num:"1,200+",label:"Subscribers"},
+          {num:"52",label:"Issues Published"},
+          {num:"68%",label:"Open Rate"},
+          {num:"4.9/5",label:"Reader Rating"},
+        ].map((s,i)=>
+          <div key={i} style={{textAlign:"center"}}>
+            <div style={{fontSize:16,fontWeight:800,fontFamily:"'IBM Plex Mono',monospace",color:"var(--ac)"}}>{s.num}</div>
+            <div style={{fontSize:9,color:"var(--t3)",fontWeight:600,textTransform:"uppercase",letterSpacing:.5}}>{s.label}</div>
+          </div>
+        )}
+      </div>
+
+      {/* Recent Issues Preview */}
+      <div style={{marginTop:24}}>
+        <div style={{fontSize:10,fontWeight:700,color:"var(--t3)",textTransform:"uppercase",letterSpacing:1,marginBottom:10,textAlign:"center"}}>Recent Issues</div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10}}>
+          {[
+            {num:"#52",title:"Why Your Should-Cost Model Is Missing 15% of the Cost",tag:"COST ENGINEERING"},
+            {num:"#51",title:"Steel Landed Cost: Mill vs Trader — The Real Math",tag:"STEEL SUPPLY CHAIN"},
+            {num:"#50",title:"I Negotiated ₹2.8 Cr Savings in 90 Days. Here's the Framework.",tag:"NEGOTIATION"},
+          ].map((iss,i)=>
+            <div key={i} style={{background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:8,padding:12,cursor:"pointer",transition:"all .2s"}}
+              onMouseEnter={e=>{e.currentTarget.style.borderColor="var(--ac)";e.currentTarget.style.transform="translateY(-2px)"}}
+              onMouseLeave={e=>{e.currentTarget.style.borderColor="var(--s2)";e.currentTarget.style.transform="none"}}
+            >
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                <span style={{fontSize:9,fontWeight:700,color:"var(--ac)",fontFamily:"'IBM Plex Mono'"}}>{iss.num}</span>
+                <span style={{fontSize:8,fontWeight:600,color:"var(--t3)",background:"var(--s1)",padding:"2px 6px",borderRadius:4}}>{iss.tag}</span>
+              </div>
+              <div style={{fontSize:12,fontWeight:600,lineHeight:1.5,color:"var(--t1)"}}>{iss.title}</div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+    </section>
+
+    <footer style={{borderTop:"1px solid var(--s2)",marginTop:0}}>
+      {/* CTA Banner */}
+      <div style={{background:"linear-gradient(135deg,var(--ac),#7c3aed)",padding:"36px 20px",textAlign:"center"}}>
+        <h3 style={{fontFamily:"'Bricolage Grotesque'",fontSize:22,fontWeight:800,color:"#fff",marginBottom:6}}>Ready to trace every rupee?</h3>
+        <p style={{fontSize:13,color:"rgba(255,255,255,.8)",marginBottom:16}}>Join procurement managers who've stopped overpaying. Start with 13 modules — free, forever.</p>
+        <button className="btn-pri" style={{background:"#fff",color:"var(--ac)",fontSize:14,padding:"12px 32px",fontWeight:700}} onClick={()=>{setAuthMode("register");setShowAuth(true)}}>{BETA_CONFIG.enabled?"🧪 Join Private Beta →":"Start Free — No Credit Card →"}</button>
+      </div>
+      {/* Main Footer */}
+      <div style={{background:"var(--s1)",padding:"40px 0 20px"}}><div className="wrap">
+        <div style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr 1fr",gap:30,marginBottom:30}}>
+          {/* Brand */}
+          <div>
+            <div style={{fontFamily:"'Bricolage Grotesque'",fontSize:20,fontWeight:800,marginBottom:8}}><CLIcon size={26}/><span style={{marginLeft:4}}>Cost</span><span style={{color:"var(--ac)"}}>Lens</span></div>
+            <p style={{fontSize:12,color:"var(--t2)",lineHeight:1.7,marginBottom:12}}>AI-powered zero-based costing platform for manufacturing procurement. 13 modules, 50+ templates, expert-grade analysis — built by a procurement professional with 25+ years of experience.</p>
+            <div style={{display:"flex",gap:8}}>
+              {[{icon:"in",label:"LinkedIn",color:"#0077b5"},{icon:"𝕏",label:"Twitter",color:"var(--t2)"},{icon:"✉",label:"Email",color:"var(--t2)"}].map((s,i)=>
+                <div key={i} style={{width:30,height:30,borderRadius:6,background:"var(--bg)",border:"1px solid var(--s2)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,cursor:"pointer",color:s.color}} title={s.label}>{s.icon}</div>
+              )}
+            </div>
+          </div>
+          {/* Product */}
+          <div>
+            <div style={{fontSize:10,fontWeight:700,color:"var(--t3)",textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Product</div>
+            {["All 13 Modules","Should-Cost Analysis","Tool & Die Costing","TCO Calculator","Spend Analysis","AI Extraction","Ebook Preview"].map((l,i)=>
+              <div key={i} style={{fontSize:12,color:"var(--t2)",padding:"3px 0",cursor:"pointer"}} onClick={()=>document.getElementById("modules")?.scrollIntoView({behavior:"smooth"})}>{l}</div>
+            )}
+          </div>
+          {/* Company */}
+          <div>
+            <div style={{fontSize:10,fontWeight:700,color:"var(--t3)",textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Company</div>
+            {[{l:"About Us",p:"about"},{l:"Pricing",p:null},{l:"Expert Reports",p:null},{l:"Blog",p:"blog"},{l:"Careers",p:"careers"},{l:"Contact Us",p:"contact"}].map((lk,i)=>
+              <div key={i} style={{fontSize:12,color:"var(--t2)",padding:"3px 0",cursor:"pointer"}} onClick={()=>{if(lk.p){setLp(lk.p);window.scrollTo(0,0)}else{document.getElementById("pricing")?.scrollIntoView({behavior:"smooth"})}}}>{lk.l}</div>
+            )}
+          </div>
+          {/* Legal */}
+          <div>
+            <div style={{fontSize:10,fontWeight:700,color:"var(--t3)",textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Legal</div>
+            {[{l:"Privacy Policy",p:"privacy"},{l:"Terms of Service",p:"terms"},{l:"Refund Policy",p:"refund"},{l:"Trust & Security",p:"security"},{l:"GDPR Compliance",p:"privacy"}].map((lk,i)=>
+              <div key={i} style={{fontSize:12,color:"var(--t2)",padding:"3px 0",cursor:"pointer"}} onClick={()=>{setLp(lk.p);window.scrollTo(0,0)}}>{lk.l}</div>
+            )}
+            <div style={{marginTop:10,padding:8,background:"var(--bg)",borderRadius:6,border:"1px solid var(--s2)"}}>
+              <div style={{fontSize:9,fontWeight:700,color:"var(--ok)",marginBottom:3}}>🔒 Secure Platform</div>
+              <div style={{fontSize:9,color:"var(--t3)",lineHeight:1.5}}>256-bit SSL encryption. Your data is never shared with third parties.</div>
+            </div>
+          </div>
+        </div>
+        {/* Payment Methods */}
+        <div style={{borderTop:"1px solid var(--s2)",paddingTop:20,marginBottom:20}}>
+          <div style={{fontSize:9,fontWeight:700,color:"var(--t3)",textTransform:"uppercase",letterSpacing:1,marginBottom:10,textAlign:"center"}}>Accepted Payment Methods</div>
+          <div style={{display:"flex",justifyContent:"center",gap:8,flexWrap:"wrap"}}>
+            {[
+              {name:"VISA",bg:"#1a1f71",color:"#fff",w:48},
+              {name:"Master Card",bg:"#eb001b",color:"#fff",w:48,grad:"linear-gradient(135deg,#eb001b 50%,#f79e1b 50%)"},
+              {name:"RuPay",bg:"#097969",color:"#fff",w:48},
+              {name:"UPI",bg:"#fff",color:"#6b3fa0",w:42,border:true},
+              {name:"G Pay",bg:"#fff",color:"#4285f4",w:42,border:true},
+              {name:"PhonePe",bg:"#5f259f",color:"#fff",w:48},
+              {name:"Paytm",bg:"#00b9f5",color:"#fff",w:42},
+              {name:"Net Banking",bg:"var(--bg)",color:"var(--t2)",w:56,border:true},
+              {name:"NEFT/RTGS",bg:"var(--bg)",color:"var(--t2)",w:56,border:true},
+            ].map((p,i)=>
+              <div key={i} style={{background:p.grad||p.bg,color:p.color,fontSize:p.name.length>6?7:8,fontWeight:800,padding:"6px 4px",borderRadius:5,width:p.w,height:28,display:"flex",alignItems:"center",justifyContent:"center",border:p.border?"1px solid var(--s2)":"1px solid transparent",letterSpacing:p.name==="VISA"?2:0,fontFamily:"'DM Sans',sans-serif",textAlign:"center",lineHeight:1.1}}>
+                {p.name}
+              </div>
+            )}
+          </div>
+          <div style={{textAlign:"center",marginTop:8}}>
+            <span style={{fontSize:9,color:"var(--t3)"}}>Powered by </span>
+            {["Razorpay","Stripe"].map((g,i)=>
+              <span key={i} style={{fontSize:9,fontWeight:700,color:"var(--t2)",marginLeft:i?8:2}}>{g}</span>
+            )}
+          </div>
+        </div>
+        {/* Trust Badges */}
+        <div style={{display:"flex",justifyContent:"center",gap:16,flexWrap:"wrap",marginBottom:20}}>
+          {[
+            {icon:"🏭",text:"Built for Indian Manufacturing"},
+            {icon:"🔒",text:"256-bit SSL Encrypted"},
+            {icon:"🇮🇳",text:"Made in India"},
+            {icon:"⚡",text:"99.9% Uptime SLA"},
+            {icon:"🛡️",text:"SOC 2 Compliant"},
+          ].map((b,i)=>
+            <div key={i} style={{display:"flex",alignItems:"center",gap:5,background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:6,padding:"5px 10px"}}>
+              <span style={{fontSize:13}}>{b.icon}</span>
+              <span style={{fontSize:9,fontWeight:600,color:"var(--t2)"}}>{b.text}</span>
+            </div>
+          )}
+        </div>
+        {/* Bottom Bar */}
+        <div style={{borderTop:"1px solid var(--s2)",paddingTop:14,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+          <div style={{fontSize:10,color:"var(--t3)"}}>© 2026 CostLens Technologies Pvt. Ltd. All rights reserved.</div>
+          <div style={{display:"flex",gap:12}}>
+            {[{l:"Privacy",p:"privacy"},{l:"Terms",p:"terms"},{l:"Refund",p:"refund"},{l:"Contact",p:"contact"}].map((lk,i)=>
+              <span key={i} style={{fontSize:10,color:"var(--t3)",cursor:"pointer"}} onClick={()=>{setLp(lk.p);window.scrollTo(0,0)}}>{lk.l}</span>
+            )}
+          </div>
+          <div style={{fontSize:10,color:"var(--t3)"}}>CIN: U72900UP2026PTC0XXXXX • GSTIN: 09XXXXX</div>
+        </div>
+      </div></div>
+    </footer>
+    </>)}
+  </div>);
+
+  // ═══════════════════════════════════════════════════════════════
+  // PLATFORM (logged in)
+  // ═══════════════════════════════════════════════════════════════
+  return(<div className={`CL ${theme}`}>
+    <style>{CSS}</style>{authModal}
+    <div className="layout">
+      <div className="sidebar">
+        <div className="sb-logo" onClick={()=>{setPage("dashboard");setActiveMod(null);setResult(null)}}><CLIcon size={22} color="#fff"/><span style={{marginLeft:4}}>Cost</span><span style={{color:"var(--ac)"}}>Lens</span></div>
+        <div className="sb-nav">
+          <div className={`sb-item ${page==="dashboard"&&!activeMod?"active":""}`} onClick={()=>{setPage("dashboard");setActiveMod(null);setResult(null)}}>📊 Dashboard</div>
+          {cats.map(cat=><div key={cat}><div className="sb-cat">{cat}</div>{MODS.filter(m=>m.cat===cat).map(m=><div key={m.id} className={`sb-item ${activeMod===m.id?"active":""}`} onClick={()=>openMod(m.id)}><span style={{fontSize:13}}>{m.icon}</span> {m.name}</div>)}</div>)}
+          <div className="sb-cat">Analysis Reports</div>
+          {REPORTS.map(r=><div key={r.id} className={`sb-item ${activeReport===r.id?"active":""}`} onClick={()=>openReport(r.id)}><span style={{fontSize:13}}>{r.icon}</span> {r.name}</div>)}
+          <div className="sb-cat">AI Commercial Tools</div>
+          {AI_TOOLS.map(t=><div key={t.id} className={`sb-item ${activeTool===t.id?"active":""}`} onClick={()=>openTool(t.id)}><span style={{fontSize:13}}>{t.icon}</span> {t.name} {plan!=="pro"&&<span style={{fontSize:8,background:"var(--ac)",color:"#fff",padding:"1px 5px",borderRadius:4,marginLeft:4}}>PRO</span>}</div>)}
+          <div className="sb-cat">Intelligence</div>
+          <div className={`sb-item ${page==="commodity"?"active":""}`} onClick={()=>{setPage("commodity");setActiveMod(null);setActiveReport(null)}}><span style={{fontSize:13}}>📈</span> Commodity Watchlist {plan!=="pro"&&<span style={{fontSize:8,background:"var(--ac)",color:"#fff",padding:"1px 5px",borderRadius:4,marginLeft:4}}>PRO</span>}</div>
+          <div className="sb-cat">Resources</div>
+          <div className={`sb-item ${page==="ebooks"?"active":""}`} onClick={()=>{setPage("ebooks");setActiveMod(null);setActiveReport(null)}}>📚 Ebooks</div>
+          <div className={`sb-item ${page==="trust"?"active":""}`} onClick={()=>{setPage("trust");setActiveMod(null);setActiveReport(null)}}>🔒 Trust & Security</div>
+        </div>
+        <div className="sb-bottom">
+          <div className="sb-credits-row">{plan==="pro"?<><div className="sb-cbar"><div style={{width:((credits/50)*100)+"%",height:"100%",background:credits<=5?"#ef4444":credits<=10?"#f59e0b":"var(--ac)",borderRadius:2,transition:"all .3s"}}/></div><span style={{fontSize:9,color:credits<=5?"#ef4444":credits<=10?"#f59e0b":"#96a3b8",fontWeight:credits<=5?700:400}}>{credits} AI{credits<=5?" ⚠":""}  </span></>:<span style={{fontSize:9,color:"#667892",padding:"0 4px"}}>Starter — Manual only</span>}</div>
+          {plan==="free"&&<button className="sb-upgrade" onClick={upgrade}>⚡ Upgrade Professional — ₹1,999/mo</button>}
+          <div style={{display:"flex",alignItems:"center",gap:6,padding:"6px 8px",cursor:"pointer"}} onClick={()=>{setPage("profile");setActiveMod(null);setActiveReport(null);setActiveTool(null)}}><div style={{width:26,height:26,borderRadius:"50%",background:"var(--ac)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,color:"#fff"}}>{user.name[0].toUpperCase()}</div><div><div style={{fontSize:11,fontWeight:500}}>{user.name}</div><div style={{fontSize:8,color:"var(--t3)",textTransform:"uppercase"}}>{user.isBeta?"🧪 Beta Tester":plan==="pro"?"Professional":"Starter"}</div></div></div>
+          {user.isBeta&&<div style={{margin:"2px 8px",fontSize:9,color:"#7c3aed",background:"rgba(124,58,237,.08)",border:"1px solid rgba(124,58,237,.15)",borderRadius:6,padding:"3px 8px",textAlign:"center"}}>Beta ends {betaEndDate()} • {betaDaysLeft()}d left</div>}
+          {(user.isAdmin||user.email===BETA_CONFIG.adminEmail)&&<div className={`sb-item ${page==="admin"?"active":""}`} onClick={()=>{setPage("admin");setActiveMod(null);setActiveReport(null)}} style={{fontSize:11,color:"#f43f5e",fontWeight:700}}>🛡️ Admin Dashboard</div>}
+          <button style={{fontSize:10,color:"var(--t3)",background:"none",border:"none",cursor:"pointer",padding:"2px 8px",fontFamily:"DM Sans"}} onClick={logout}>Sign Out</button>
+          <button onClick={toggleTheme} style={{background:"none",border:"1px solid var(--s3)",borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:12,lineHeight:1,color:"#96a3b8",width:"calc(100% - 16px)",margin:"4px 8px"}} title="Toggle theme">{theme==="dark"?"☀️ Light Mode":"🌙 Dark Mode"}</button>
+        </div>
+      </div>
+      <div className="main"><div className="main-pad">
+        {/* ═══ CREDIT WARNING BANNERS (Layer 1) ═══ */}
+        {plan==="pro"&&credits>0&&credits<=10&&<div style={{background:credits<=5?"rgba(239,68,68,.06)":"rgba(245,158,11,.06)",border:"1px solid "+(credits<=5?"rgba(239,68,68,.2)":"rgba(245,158,11,.2)"),borderRadius:10,padding:"10px 16px",marginBottom:12,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <span style={{fontSize:18}}>{credits<=1?"🔴":credits<=5?"🟠":"🟡"}</span>
+            <div>
+              <div style={{fontSize:12,fontWeight:700,color:credits<=5?"var(--err)":"var(--warn)"}}>{credits<=1?"Last AI credit remaining!":credits<=5?credits+" AI credits left — running low":""+credits+" AI credits remaining this month"}</div>
+              <div style={{fontSize:10,color:"var(--t2)"}}>{credits<=1?"After this, AI features will be paused until credits are replenished":"Manual modules continue to work. Only AI extraction and AI tools need credits."}</div>
+            </div>
+          </div>
+          {credits<=5&&<div style={{fontSize:9,padding:"4px 12px",borderRadius:6,background:credits<=1?"var(--err)":"var(--warn)",color:"#fff",fontWeight:700}}>{credits<=1?"1 credit":"Use wisely"}</div>}
+        </div>}
+        {/* ═══ LAYER 1: CREDIT WARNING BANNERS ═══ */}
+        {plan==="pro"&&credits>0&&credits<=10&&<div style={{background:credits<=1?"rgba(239,68,68,.08)":credits<=5?"rgba(245,158,11,.08)":"rgba(59,130,246,.06)",border:"1px solid "+(credits<=1?"rgba(239,68,68,.3)":credits<=5?"rgba(245,158,11,.3)":"rgba(59,130,246,.2)"),borderRadius:10,padding:"10px 16px",marginBottom:12,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <span style={{fontSize:16}}>{credits<=1?"🔴":credits<=5?"🟠":"🟡"}</span>
+            <div>
+              <div style={{fontSize:12,fontWeight:700,color:credits<=1?"var(--err)":credits<=5?"#f59e0b":"var(--ac)"}}>{credits<=1?"Last AI credit remaining!":credits<=5?credits+" AI credits left — use wisely":credits+" AI credits remaining this month"}</div>
+              <div style={{fontSize:10,color:"var(--t2)"}}>{credits<=1?"After this, AI features will pause. Manual modules still work.":credits<=5?"AI extraction, reports, and tools consume 1-3 credits each.":"All 14 manual modules continue working without credits."}</div>
+            </div>
+          </div>
+          {BETA_CONFIG.enabled&&user?.isBeta&&!feedbackSent&&credits<=5&&<button style={{fontSize:10,padding:"5px 12px",borderRadius:8,border:"1px solid #7c3aed",background:"rgba(124,58,237,.1)",color:"#7c3aed",cursor:"pointer",fontWeight:700,whiteSpace:"nowrap"}} onClick={()=>setShowCreditModal(true)}>💬 Get 25 bonus credits</button>}
+        </div>}
+
+        {/* ═══ LAYER 3: CREDIT EXHAUSTED BANNER ═══ */}
+        {plan==="pro"&&credits<=0&&<div style={{background:"rgba(239,68,68,.06)",border:"1px solid rgba(239,68,68,.2)",borderRadius:12,padding:"16px 18px",marginBottom:14}}>
+          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+            <span style={{fontSize:24}}>🚫</span>
+            <div>
+              <div style={{fontSize:14,fontWeight:700,color:"var(--err)"}}>AI Credits Exhausted</div>
+              <div style={{fontSize:11,color:"var(--t2)"}}>AI-powered features are paused. Manual modules still work.</div>
+            </div>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:10}}>
+            <div style={{background:"var(--bg)",borderRadius:8,padding:10,textAlign:"center"}}>
+              <div style={{fontSize:20}}>✅</div>
+              <div style={{fontSize:10,fontWeight:600,color:"var(--ok)",marginTop:4}}>Still Available</div>
+              <div style={{fontSize:9,color:"var(--t3)",marginTop:2}}>All 14 modules • Templates • Manual data entry • Calculate</div>
+            </div>
+            <div style={{background:"var(--bg)",borderRadius:8,padding:10,textAlign:"center"}}>
+              <div style={{fontSize:20}}>⏸️</div>
+              <div style={{fontSize:10,fontWeight:600,color:"var(--err)",marginTop:4}}>Paused</div>
+              <div style={{fontSize:9,color:"var(--t3)",marginTop:2}}>AI extraction • AI reports • AI commercial tools • Commodity signals</div>
+            </div>
+            <div style={{background:"var(--bg)",borderRadius:8,padding:10,textAlign:"center"}}>
+              <div style={{fontSize:20}}>{BETA_CONFIG.enabled?"💬":"💳"}</div>
+              <div style={{fontSize:10,fontWeight:600,color:"var(--ac)",marginTop:4}}>{BETA_CONFIG.enabled?"Get More Credits":"Coming Soon"}</div>
+              <div style={{fontSize:9,color:"var(--t3)",marginTop:2}}>{BETA_CONFIG.enabled?"Share feedback → 25 bonus credits":"Top-up packs & monthly reset"}</div>
+            </div>
+          </div>
+          {BETA_CONFIG.enabled&&user?.isBeta&&!feedbackSent&&<button className="btn-pri" style={{width:"100%",fontSize:12,padding:"10px"}} onClick={()=>setShowCreditModal(true)}>💬 Share Your Feedback → Get 25 Bonus Credits Instantly</button>}
+          {feedbackSent&&<div style={{textAlign:"center",fontSize:12,color:"var(--ok)",fontWeight:600,padding:8}}>✅ Feedback submitted — 25 bonus credits added! Thank you for helping shape CostLens.</div>}
+          {!BETA_CONFIG.enabled&&<div style={{textAlign:"center",fontSize:11,color:"var(--t3)",padding:6}}>Credits reset on the 1st of each month. Top-up packs coming soon.</div>}
+        </div>}
+
+        {/* ═══ BETA FEEDBACK FOR CREDITS MODAL (Layer 3) ═══ */}
+        {showCreditModal&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.6)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000}} onMouseDown={e=>{if(e.target===e.currentTarget)setShowCreditModal(false)}}>
+          <div style={{background:"var(--s1)",border:"1px solid var(--s3)",borderRadius:16,padding:32,maxWidth:480,width:"90%"}}>
+            <div style={{textAlign:"center",marginBottom:16}}>
+              <div style={{fontSize:40,marginBottom:8}}>🎉</div>
+              <div style={{fontSize:18,fontWeight:800,fontFamily:"'Bricolage Grotesque'"}}>You've used all 50 AI credits!</div>
+              <div style={{fontSize:13,color:"var(--t2)",marginTop:6,lineHeight:1.6}}>That means you're finding CostLens useful — and that makes us happy. Share your feedback and we'll add <b style={{color:"var(--ac)"}}>25 bonus credits</b> instantly.</div>
+            </div>
+            {!feedbackSent?<div>
+              <div style={{fontSize:12,fontWeight:600,marginBottom:8}}>Your feedback (even 2 lines helps):</div>
+              {["Which features did you use most?","Were the AI results accurate and useful?","What's missing that would make you pay for this?","Any bugs or confusing areas?"].map((q,i)=>
+                <div key={i} style={{fontSize:10,color:"var(--t2)",padding:"3px 0",display:"flex",gap:4}}><span style={{color:"var(--ac)"}}>→</span>{q}</div>)}
+              <textarea value={feedbackText} onChange={e=>setFeedbackText(e.target.value)} placeholder="Type your feedback here..." style={{width:"100%",minHeight:120,marginTop:10,padding:12,borderRadius:8,border:"1px solid var(--s3)",background:"var(--bg)",color:"var(--t1)",fontSize:12,fontFamily:"DM Sans",resize:"vertical"}}/>
+              <div style={{display:"flex",gap:8,marginTop:12}}>
+                <button className="btn-pri" style={{flex:1}} disabled={feedbackText.trim().length<10} onClick={async()=>{
+                  setCredits(c=>c+25);setFeedbackSent(true);
+                  if(user){const users=await dbGet("cl-users")||{};if(users[user.email]){users[user.email].credits=(users[user.email].credits||0)+25;await dbSet("cl-users",users)}const u={...user,credits:(credits||0)+25};await dbSet("cl-session",u)}
+                  logBetaEvent("BETA_FEEDBACK",{email:user?.email,detail:feedbackText.slice(0,500)});
+                  if(user)await dbSet("cl-feedback-sent-"+user.email,true);
+                  setTimeout(()=>setShowCreditModal(false),2000);
+                }}>🎁 Submit Feedback → Get 25 Credits</button>
+                <button className="btn-sec" onClick={()=>setShowCreditModal(false)}>Later</button>
+              </div>
+              <div style={{fontSize:9,color:"var(--t3)",marginTop:8,textAlign:"center"}}>Minimum 10 characters. Your feedback is shared only with the CostLens team.</div>
+            </div>
+            :<div style={{textAlign:"center",padding:20}}>
+              <div style={{fontSize:40,marginBottom:8}}>✅</div>
+              <div style={{fontSize:16,fontWeight:700,color:"var(--ok)"}}>Thank you! 25 bonus credits added.</div>
+              <div style={{fontSize:12,color:"var(--t2)",marginTop:6}}>Your feedback directly shapes the product. Keep exploring!</div>
+            </div>}
+          </div>
+        </div>}
+        {page==="dashboard"&&<div>
+          {user.isBeta&&<div style={{background:"linear-gradient(90deg,rgba(124,58,237,.08),rgba(37,99,235,.08))",border:"1px solid rgba(124,58,237,.2)",borderRadius:12,padding:14,marginBottom:16,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+            <div><span style={{fontSize:10,fontWeight:700,color:"#fff",background:"linear-gradient(90deg,#7c3aed,#2563eb)",padding:"3px 10px",borderRadius:12}}>🧪 BETA TESTER</span>
+              <span style={{fontSize:12,fontWeight:600,marginLeft:10}}>Welcome to the CostLens private beta!</span></div>
+            <div style={{fontSize:11,color:"var(--t2)"}}>Full Pro access • 50 AI credits • Expires <b>{betaEndDate()}</b> ({betaDaysLeft()} days left)</div>
+          </div>}
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+            <div style={{fontSize:20,fontWeight:700}}>Welcome, {user.name}</div>
+            <div className="dash-stats" style={{margin:0}}>{[["Analyses",history.length,"var(--ac)"],["AI Credits",credits,""],["Plan",user.isBeta?"🧪 BETA":plan==="pro"?"PRO":"FREE",""]].map(([l,v,c],i)=><div key={i} className="dash-stat" style={{padding:"4px 12px"}}><div style={{fontSize:8,color:"var(--t3)",textTransform:"uppercase"}}>{l}</div><div style={{fontFamily:"IBM Plex Mono",fontSize:14,fontWeight:600,color:c||"var(--t1)"}}>{v}</div></div>)}</div>
+          </div>
+
+          {/* ═══ CONTINUE WHERE YOU LEFT OFF ═══ */}
+          {history.length>0&&<div style={{marginBottom:18}}>
+            <div style={{fontSize:12,fontWeight:600,color:"var(--t3)",marginBottom:6}}>🕐 Continue where you left off</div>
+            <div style={{display:"flex",gap:8,overflowX:"auto",paddingBottom:4}}>
+              {history.slice(0,4).map(h=>{const m=MODS.find(x=>x.id===h.module);return <div key={h.id} className="mod-card" style={{flexShrink:0,width:200,cursor:"pointer"}} onClick={()=>{setResult(h);setPage("result")}}>
+                <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}><span style={{fontSize:16}}>{m?.icon||"📊"}</span><span style={{fontSize:11,fontWeight:600}}>{h.name}</span></div>
+                <div style={{fontSize:9,color:"var(--t3)"}}>{m?.name} • {h.date}</div>
+                <div style={{fontFamily:"IBM Plex Mono",fontWeight:700,color:"var(--ac)",fontSize:13,marginTop:4}}>{h.resultVal}</div>
+              </div>})}
+            </div>
+          </div>}
+
+          {/* ═══ QUICK ACCESS — Favorites or defaults ═══ */}
+          <div style={{display:"flex",gap:6,marginBottom:18,flexWrap:"wrap",alignItems:"center"}}>
+            <span style={{fontSize:10,color:"var(--t3)",lineHeight:"28px",marginRight:4}}>{prefs.favorites.length>0?"⭐ Favorites:":"🔥 Quick:"}</span>
+            {(()=>{
+              if(prefs.favorites.length>0){
+                return prefs.favorites.map(f=>{
+                  const[type,id]=f.split(":");
+                  if(type==="mod"){const m=MODS.find(x=>x.id===id);return m?<button key={f} onClick={()=>openMod(id)} style={{fontSize:10,padding:"5px 12px",borderRadius:8,border:"1px solid var(--s3)",background:"var(--s1)",color:"var(--t2)",cursor:"pointer",fontFamily:"DM Sans",display:"flex",alignItems:"center",gap:4}}><span>{m.icon}</span>{m.name}</button>:null}
+                  if(type==="tool"){const t=AI_TOOLS.find(x=>x.id===id);return t?<button key={f} onClick={()=>openTool(id)} style={{fontSize:10,padding:"5px 12px",borderRadius:8,border:"1px solid var(--s3)",background:"var(--s1)",color:"var(--t2)",cursor:"pointer",fontFamily:"DM Sans",display:"flex",alignItems:"center",gap:4}}><span>{t.icon}</span>{t.name}</button>:null}
+                  if(type==="rpt"){const r=REPORTS.find(x=>x.id===id);return r?<button key={f} onClick={()=>openReport(id)} style={{fontSize:10,padding:"5px 12px",borderRadius:8,border:"1px solid var(--s3)",background:"var(--s1)",color:"var(--t2)",cursor:"pointer",fontFamily:"DM Sans",display:"flex",alignItems:"center",gap:4}}><span>{r.icon}</span>{r.name}</button>:null}
+                  return null;
+                });
+              }
+              return [{id:"should-cost",icon:"🏭",n:"Should-Cost",fn:openMod},{id:"price-check",icon:"💲",n:"Price Check",fn:openTool},{id:"contract-analyzer",icon:"📜",n:"Contract Analyzer",fn:openTool},{id:"rfq-comparator",icon:"📊",n:"RFQ Comparator",fn:openTool}].map(q=>
+                <button key={q.id} onClick={()=>q.fn(q.id)} style={{fontSize:10,padding:"5px 12px",borderRadius:8,border:"1px solid var(--s3)",background:"var(--s1)",color:"var(--t2)",cursor:"pointer",fontFamily:"DM Sans",display:"flex",alignItems:"center",gap:4}}><span>{q.icon}</span>{q.n}</button>);
+            })()}
+            <span style={{fontSize:9,color:"var(--ac)",cursor:"pointer",marginLeft:4}} onClick={()=>{setPage("profile");setActiveMod(null)}}>✏️ Edit favorites</span>
+          </div>
+
+          {/* ═══ SMART GUIDED FLOW — Step 1 ═══ */}
+          {!showAllFeatures&&<div>
+            <div style={{fontSize:15,fontWeight:700,marginBottom:12}}>What are you working on today?</div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:10,marginBottom:20}}>
+              {[
+                {icon:"📄",title:"I have a document to analyze",sub:"Quotation, contract, drawing, BOM",color:"#3b82f6",step:"doc"},
+                {icon:"🧮",title:"I need to build a cost",sub:"Should-cost, tool, packaging, freight",color:"#10b981",step:"cost"},
+                {icon:"🤝",title:"I have a negotiation coming up",sub:"Strategy, leverage, talking points",color:"#f59e0b",action:()=>openTool("negotiation-brief")},
+                {icon:"📊",title:"I need a report for management",sub:"Spend, savings, risk, scorecard",color:"#8b5cf6",step:"report"},
+                {icon:"📈",title:"I want to check commodity prices",sub:"Live market signals, BUY/WAIT/HOLD",color:"#ef4444",action:()=>{setPage("commodity");setActiveMod(null)}},
+              ].map((c,i)=><div key={i} onClick={()=>c.action?c.action():setGuideStep(c.step)} style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:14,padding:18,cursor:"pointer",position:"relative",overflow:"hidden",transition:"all .2s"}} onMouseEnter={e=>e.currentTarget.style.borderColor=c.color} onMouseLeave={e=>e.currentTarget.style.borderColor="var(--s2)"}>
+                <div style={{position:"absolute",top:0,left:0,right:0,height:3,background:c.color}}/>
+                <div style={{fontSize:28,marginBottom:8}}>{c.icon}</div>
+                <div style={{fontSize:13,fontWeight:700,color:"var(--t1)",marginBottom:4}}>{c.title}</div>
+                <div style={{fontSize:10,color:"var(--t3)",lineHeight:1.4}}>{c.sub}</div>
+              </div>)}
+            </div>
+
+            {/* ═══ Step 2 — Document Types ═══ */}
+            {guideStep==="doc"&&<div style={{background:"rgba(59,130,246,.04)",border:"1px solid rgba(59,130,246,.15)",borderRadius:14,padding:18,marginBottom:20}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                <div style={{fontSize:14,fontWeight:700,color:"var(--ac)"}}>📄 What type of document?</div>
+                <button onClick={()=>setGuideStep(null)} style={{fontSize:10,color:"var(--t3)",background:"none",border:"1px solid var(--s3)",borderRadius:6,padding:"3px 10px",cursor:"pointer"}}>✕ Back</button>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:8}}>
+                {[
+                  {icon:"💰",t:"One supplier quotation",sub:"Check if price is fair",fn:()=>openTool("quote-analysis")},
+                  {icon:"📊",t:"Multiple vendor quotes (2-5)",sub:"Compare & rank vendors",fn:()=>openTool("rfq-comparator")},
+                  {icon:"📜",t:"Contract / Agreement",sub:"Flag risky & missing clauses",fn:()=>openTool("contract-analyzer")},
+                  {icon:"📐",t:"Engineering drawing / BOM",sub:"Build should-cost from drawing",fn:()=>openMod("should-cost")},
+                  {icon:"🔧",t:"Service / AMC quotes",sub:"Compare service vendors, check L1",fn:()=>openTool("service-comparator")},
+                  {icon:"💲",t:"Quick price check (no doc)",sub:"Enter item + price → fair/high/low",fn:()=>openTool("price-check")},
+                ].map((d,i)=><div key={i} onClick={d.fn} style={{background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:10,padding:14,cursor:"pointer",transition:"border-color .2s"}} onMouseEnter={e=>e.currentTarget.style.borderColor="var(--ac)"} onMouseLeave={e=>e.currentTarget.style.borderColor="var(--s2)"}>
+                  <span style={{fontSize:22}}>{d.icon}</span>
+                  <div style={{fontSize:12,fontWeight:600,marginTop:6}}>{d.t}</div>
+                  <div style={{fontSize:10,color:"var(--t3)",marginTop:2}}>{d.sub}</div>
+                </div>)}
+              </div>
+            </div>}
+
+            {/* ═══ Step 2 — Cost Building ═══ */}
+            {guideStep==="cost"&&<div style={{background:"rgba(16,185,129,.04)",border:"1px solid rgba(16,185,129,.15)",borderRadius:14,padding:18,marginBottom:20}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                <div style={{fontSize:14,fontWeight:700,color:"#10b981"}}>🧮 What cost are you building?</div>
+                <button onClick={()=>setGuideStep(null)} style={{fontSize:10,color:"var(--t3)",background:"none",border:"1px solid var(--s3)",borderRadius:6,padding:"3px 10px",cursor:"pointer"}}>✕ Back</button>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:8}}>
+                {[
+                  {icon:"🏭",t:"Component / Part cost",sub:"Zero-based process sheet from drawing",fn:()=>openMod("should-cost")},
+                  {icon:"🔧",t:"Tool / Die / Mould cost",sub:"Toolroom operations + bought-out",fn:()=>openMod("tool-cost")},
+                  {icon:"📦",t:"Packaging cost per piece",sub:"Box dimensions → deckle → ZBC",fn:()=>openMod("packaging")},
+                  {icon:"🚛",t:"Freight / Transport cost",sub:"Route-based per-piece freight",fn:()=>openMod("transport")},
+                  {icon:"🌏",t:"Import landed cost",sub:"FOB + duty + IGST + charges",fn:()=>openMod("landed")},
+                  {icon:"⚖️",t:"Make vs Buy decision",sub:"In-house vs outsource comparison",fn:()=>openMod("make-buy")},
+                  {icon:"📊",t:"Supplier cost breakdown (CBS)",sub:"Validate supplier's cost claim",fn:()=>openMod("cbs")},
+                  {icon:"🔩",t:"Other costing modules",sub:"TCO, BOM, Capex, Currency, Energy...",fn:()=>setShowAllFeatures(true)},
+                ].map((d,i)=><div key={i} onClick={d.fn} style={{background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:10,padding:14,cursor:"pointer",transition:"border-color .2s"}} onMouseEnter={e=>e.currentTarget.style.borderColor="#10b981"} onMouseLeave={e=>e.currentTarget.style.borderColor="var(--s2)"}>
+                  <span style={{fontSize:22}}>{d.icon}</span>
+                  <div style={{fontSize:12,fontWeight:600,marginTop:6}}>{d.t}</div>
+                  <div style={{fontSize:10,color:"var(--t3)",marginTop:2}}>{d.sub}</div>
+                </div>)}
+              </div>
+            </div>}
+
+            {/* ═══ Step 2 — Reports ═══ */}
+            {guideStep==="report"&&<div style={{background:"rgba(139,92,246,.04)",border:"1px solid rgba(139,92,246,.15)",borderRadius:14,padding:18,marginBottom:20}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                <div style={{fontSize:14,fontWeight:700,color:"#8b5cf6"}}>📊 What's the report for?</div>
+                <button onClick={()=>setGuideStep(null)} style={{fontSize:10,color:"var(--t3)",background:"none",border:"1px solid var(--s3)",borderRadius:6,padding:"3px 10px",cursor:"pointer"}}>✕ Back</button>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:8}}>
+                {[
+                  {icon:"🔍",t:"Where is our money going?",sub:"Upload PO data → full spend analysis",fn:()=>openReport("spend")},
+                  {icon:"📉",t:"Price variance analysis",sub:"Compare prices across periods/suppliers",fn:()=>openReport("price-variance")},
+                  {icon:"💰",t:"Track cost reduction progress",sub:"Validate savings pipeline",fn:()=>openReport("cost-reduction-tracker")},
+                  {icon:"⚠️",t:"Supplier risk assessment",sub:"Concentration, dependency heat map",fn:()=>openReport("supplier-risk")},
+                  {icon:"⭐",t:"Supplier performance review",sub:"Score vendors on QCD metrics",fn:()=>openReport("supplier-scorecard")},
+                  {icon:"🎯",t:"Category opportunity analysis",sub:"Find savings by spend category",fn:()=>openReport("category-opportunity")},
+                ].map((d,i)=><div key={i} onClick={d.fn} style={{background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:10,padding:14,cursor:"pointer",transition:"border-color .2s"}} onMouseEnter={e=>e.currentTarget.style.borderColor="#8b5cf6"} onMouseLeave={e=>e.currentTarget.style.borderColor="var(--s2)"}>
+                  <span style={{fontSize:22}}>{d.icon}</span>
+                  <div style={{fontSize:12,fontWeight:600,marginTop:6}}>{d.t}</div>
+                  <div style={{fontSize:10,color:"var(--t3)",marginTop:2}}>{d.sub}</div>
+                </div>)}
+              </div>
+            </div>}
+
+            <div style={{textAlign:"center",marginTop:4}}>
+              <span style={{fontSize:11,color:"var(--ac)",cursor:"pointer",fontWeight:600}} onClick={()=>setShowAllFeatures(true)}>Show all 14 modules, 8 reports, 6 AI tools →</span>
+            </div>
+          </div>}
+
+          {/* ═══ ALL FEATURES (old grid — toggled) ═══ */}
+          {showAllFeatures&&<div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+              <div style={{fontSize:14,fontWeight:600}}>All Features</div>
+              <button onClick={()=>setShowAllFeatures(false)} style={{fontSize:10,color:"var(--ac)",background:"none",border:"1px solid var(--ac)",borderRadius:6,padding:"4px 12px",cursor:"pointer"}}>← Back to Guide</button>
+            </div>
+            <div style={{fontSize:12,fontWeight:600,marginBottom:6}}>Costing Modules</div>
+            <div className="mod-grid">{MODS.map(m=><div key={m.id} className="mod-card" onClick={()=>openMod(m.id)}><div style={{position:"absolute",top:0,left:0,right:0,height:3,background:m.color}}/><div style={{fontSize:22,marginBottom:4}}>{m.icon}</div><div style={{fontSize:12,fontWeight:600}}>{m.name}</div><div style={{fontSize:10,color:"var(--t3)"}}>{m.desc}</div></div>)}</div>
+            <div style={{fontSize:12,fontWeight:600,margin:"16px 0 6px"}}>📊 Analysis Reports</div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:6}}>{REPORTS.map(r=><div key={r.id} className="mod-card" onClick={()=>openReport(r.id)} style={{borderLeft:"3px solid var(--warn)"}}><div style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:18}}>{r.icon}</span><span style={{fontSize:11,fontWeight:600}}>{r.name}</span></div><div style={{fontSize:10,color:"var(--t3)",marginTop:3}}>{r.desc.slice(0,60)}...</div></div>)}</div>
+            <div style={{fontSize:12,fontWeight:600,margin:"16px 0 6px"}}>⚡ AI Commercial Tools</div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:6}}>{AI_TOOLS.map(t=><div key={t.id} className="mod-card" onClick={()=>openTool(t.id)} style={{borderLeft:"3px solid "+t.color}}><div style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:18}}>{t.icon}</span><span style={{fontSize:11,fontWeight:600}}>{t.name}</span></div><div style={{fontSize:10,color:"var(--t3)",marginTop:3}}>{t.desc.slice(0,60)}...</div></div>)}</div>
+            <div style={{fontSize:12,fontWeight:600,margin:"16px 0 6px"}}>📚 Ebooks</div>
+            <div style={{display:"flex",gap:10,overflowX:"auto",paddingBottom:8}}>{EBOOKS.slice(0,5).map(b=><div key={b.id} onClick={()=>{setPage("ebooks");setActiveMod(null)}} style={{cursor:"pointer"}}><EbookCover book={b} size="sm"/></div>)}</div>
+          </div>}
+        </div>}
+        {page==="ebooks"&&<div><button className="mob-back" onClick={()=>{setPage("dashboard")}}>← Back to Dashboard</button>{EbookLibrary()}</div>}
+        {page==="trust"&&<div style={{maxWidth:760}}>
+          <button className="mob-back" onClick={()=>{setPage("dashboard")}}>← Back to Dashboard</button>
+          <div style={{fontSize:20,fontWeight:700,marginBottom:4}}>🔒 Trust & Data Security</div>
+          <p style={{fontSize:13,color:"var(--t2)",marginBottom:16}}>How CostLens protects your procurement data</p>
+
+          <div className="trust-grid">
+            <div className="trust-stat"><div style={{fontSize:22,marginBottom:4}}>🔐</div><div style={{fontFamily:"IBM Plex Mono",fontSize:18,fontWeight:800,color:"var(--ac)"}}>Zero</div><div style={{fontSize:10,color:"var(--t3)"}}>Data Retention</div></div>
+            <div className="trust-stat"><div style={{fontSize:22,marginBottom:4}}>🚫</div><div style={{fontFamily:"IBM Plex Mono",fontSize:18,fontWeight:800,color:"var(--ac)"}}>Never</div><div style={{fontSize:10,color:"var(--t3)"}}>Used for AI Training</div></div>
+            <div className="trust-stat"><div style={{fontSize:22,marginBottom:4}}>🔒</div><div style={{fontFamily:"IBM Plex Mono",fontSize:18,fontWeight:800,color:"var(--ac)"}}>TLS 1.3</div><div style={{fontSize:10,color:"var(--t3)"}}>256-bit Encryption</div></div>
+            <div className="trust-stat"><div style={{fontSize:22,marginBottom:4}}>👁️</div><div style={{fontFamily:"IBM Plex Mono",fontSize:18,fontWeight:800,color:"var(--ac)"}}>No Human</div><div style={{fontSize:10,color:"var(--t3)"}}>Sees Your Data</div></div>
+          </div>
+
+          <div className="trust-card">
+            <div style={{fontSize:14,fontWeight:700,marginBottom:10}}>How Your Data Flows</div>
+            {[
+              {icon:"📤",t:"Upload",d:"File parsed in YOUR BROWSER. Column mapping & preview happen client-side."},
+              {icon:"🛡️",t:"Anonymize",d:"Optional: supplier names replaced with Supplier_001, etc. before leaving browser."},
+              {icon:"🔐",t:"Encrypt",d:"Data sent via HTTPS/TLS 1.3 — same bank-grade encryption as UPI/NEFT."},
+              {icon:"🤖",t:"Process",d:"AI analyzes in memory. NOT stored, NOT saved, NOT retained."},
+              {icon:"📊",t:"Deliver",d:"Report rendered in browser. Close tab = data gone."},
+            ].map((s,i)=><div key={i} style={{display:"flex",gap:10,alignItems:"center",padding:"6px 0",borderBottom:i<4?"1px solid var(--s2)":"none"}}>
+              <span style={{fontSize:18}}>{s.icon}</span>
+              <div><span style={{fontSize:12,fontWeight:700}}>{s.t}: </span><span style={{fontSize:11,color:"var(--t2)"}}>{s.d}</span></div>
+            </div>)}
+          </div>
+
+          <div className="trust-card" style={{overflowX:"auto"}}>
+            <div style={{fontSize:14,fontWeight:700,marginBottom:10}}>CostLens vs. Pasting Data in ChatGPT</div>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+              <thead><tr style={{borderBottom:"2px solid var(--s2)"}}>
+                <th style={{textAlign:"left",padding:"8px",fontSize:10}}>Feature</th>
+                <th style={{textAlign:"center",padding:"8px",fontSize:10,color:"var(--err)"}}>ChatGPT/Claude Chat</th>
+                <th style={{textAlign:"center",padding:"8px",fontSize:10,color:"var(--ok)"}}>CostLens</th>
+              </tr></thead>
+              <tbody>{[
+                ["Used for AI training?","⚠️ Possible","❌ Never"],
+                ["Stored on servers?","✅ Saved","❌ Not stored"],
+                ["Humans see data?","⚠️ Possible","❌ No access"],
+                ["Anonymization?","❌ No","✅ Built-in"],
+                ["NDA available?","❌ No","✅ Digital NDA"],
+              ].map((r,i)=><tr key={i} style={{borderBottom:"1px solid var(--s2)"}}>
+                <td style={{padding:"8px",fontWeight:600}}>{r[0]}</td>
+                <td style={{padding:"8px",textAlign:"center"}}>{r[1]}</td>
+                <td style={{padding:"8px",textAlign:"center"}}>{r[2]}</td>
+              </tr>)}</tbody>
+            </table>
+          </div>
+
+          <div style={{fontSize:16,fontWeight:700,margin:"20px 0 10px"}}>📋 Digital NDA</div>
+          <NDASignOff user={user}/>
+
+          <div style={{background:"rgba(37,99,235,.04)",border:"1px solid rgba(37,99,235,.12)",borderRadius:10,padding:16,marginTop:20,textAlign:"center"}}>
+            <div style={{fontSize:13,fontWeight:700,color:"var(--ac)",marginBottom:4}}>Need a custom security review?</div>
+            <div style={{fontSize:12,color:"var(--t2)"}}>Contact <strong>enterprise@costlens.technology</strong> for vendor risk questionnaires, custom NDAs, or security assessments.</div>
+          </div>
+        </div>}
+        {/* ═══ USER PROFILE ═══ */}
+        {page==="profile"&&<div style={{maxWidth:800}}>
+          <button className="mob-back" onClick={()=>{setPage("dashboard")}}>← Back to Dashboard</button>
+          <div style={{display:"flex",alignItems:"center",gap:14,marginBottom:20}}>
+            <div style={{width:56,height:56,borderRadius:"50%",background:"var(--ac)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:24,fontWeight:700,color:"#fff"}}>{user.name[0].toUpperCase()}</div>
+            <div><div style={{fontSize:20,fontWeight:700}}>{user.name}</div>
+              <div style={{fontSize:12,color:"var(--t2)"}}>{user.email}</div>
+              <div style={{display:"flex",gap:6,marginTop:4}}>
+                <span style={{fontSize:9,padding:"2px 8px",borderRadius:6,fontWeight:700,color:"#fff",background:user.isBeta?"#7c3aed":plan==="pro"?"var(--ac)":"var(--t3)"}}>{user.isBeta?"🧪 BETA PRO":plan==="pro"?"PROFESSIONAL":"STARTER"}</span>
+                <span style={{fontSize:9,padding:"2px 8px",borderRadius:6,fontWeight:600,color:"var(--t2)",background:"var(--s2)"}}>{prefs.accountType==="enterprise"?"🏢 Enterprise":"👤 Individual"}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* ── Section 1: Account Info ── */}
+          <div style={{fontSize:14,fontWeight:700,marginBottom:10}}>👤 Account Information</div>
+          <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:12,padding:16,marginBottom:20}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+              <div className="mod-field"><label>Full Name</label><input value={user.name} readOnly style={{opacity:0.6}}/></div>
+              <div className="mod-field"><label>Email</label><input value={user.email} readOnly style={{opacity:0.6}}/></div>
+              <div className="mod-field"><label>Company / Organization</label><input value={prefs.company} onChange={e=>savePrefs({company:e.target.value})} placeholder="e.g. Hero Cycles Ltd."/></div>
+              <div className="mod-field"><label>Designation</label><input value={prefs.designation} onChange={e=>savePrefs({designation:e.target.value})} placeholder="e.g. Sr. Manager — Procurement"/></div>
+              <div className="mod-field"><label>Phone</label><input value={prefs.phone} onChange={e=>savePrefs({phone:e.target.value})} placeholder="+91 98765 43210"/></div>
+              <div className="mod-field"><label>Account Type</label>
+                <div style={{display:"flex",gap:6,marginTop:4}}>{["individual","enterprise"].map(t=>
+                  <button key={t} onClick={()=>savePrefs({accountType:t})} style={{flex:1,padding:"8px 12px",borderRadius:8,border:"1px solid "+(prefs.accountType===t?"var(--ac)":"var(--s3)"),background:prefs.accountType===t?"rgba(45,127,249,.1)":"var(--bg)",color:prefs.accountType===t?"var(--ac)":"var(--t2)",cursor:"pointer",fontSize:12,fontWeight:prefs.accountType===t?700:400}}>
+                    {t==="individual"?"👤 Individual":"🏢 Enterprise"}
+                  </button>)}</div>
+              </div>
+              <div className="mod-field"><label>Industry</label>
+                <select value={prefs.industry} onChange={e=>savePrefs({industry:e.target.value})} style={{width:"100%",padding:"6px 8px",borderRadius:6,border:"1px solid var(--s3)",background:"var(--bg)",color:"var(--t1)",fontSize:12}}>
+                  {["Manufacturing — Auto","Manufacturing — Engineering","Manufacturing — Electronics","Manufacturing — FMCG","Manufacturing — Pharma","Manufacturing — Textiles","Construction / Infrastructure","Energy / Power","Chemicals / Petrochemicals","Aerospace / Defence","IT / Services","Trading / Distribution","Other"].map(i=><option key={i}>{i}</option>)}
+                </select></div>
+              <div className="mod-field"><label>Company Size (Annual Turnover)</label>
+                <select value={prefs.companySize} onChange={e=>savePrefs({companySize:e.target.value})} style={{width:"100%",padding:"6px 8px",borderRadius:6,border:"1px solid var(--s3)",background:"var(--bg)",color:"var(--t1)",fontSize:12}}>
+                  {["Startup (<10 Cr)","SME (<100 Cr)","Mid-Size (100-500 Cr)","Large (500-2000 Cr)","Enterprise (2000+ Cr)"].map(s=><option key={s}>{s}</option>)}
+                </select></div>
+            </div>
+          </div>
+
+          {/* ── Section 2: Favorite Modules & Tools ── */}
+          <div style={{fontSize:14,fontWeight:700,marginBottom:10}}>⭐ Favorite Modules & Tools <span style={{fontSize:10,fontWeight:400,color:"var(--t3)"}}>(appear as quick-access on dashboard)</span></div>
+          <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:12,padding:16,marginBottom:20}}>
+            <div style={{fontSize:11,fontWeight:600,color:"var(--t3)",marginBottom:8}}>COSTING MODULES</div>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:14}}>
+              {MODS.map(m=>{const isFav=prefs.favorites.includes("mod:"+m.id);return(
+                <button key={m.id} onClick={()=>{const favs=isFav?prefs.favorites.filter(f=>f!=="mod:"+m.id):[...prefs.favorites,"mod:"+m.id];savePrefs({favorites:favs})}} style={{fontSize:10,padding:"5px 10px",borderRadius:8,border:"1px solid "+(isFav?"var(--ac)":"var(--s3)"),background:isFav?"rgba(45,127,249,.1)":"var(--bg)",color:isFav?"var(--ac)":"var(--t2)",cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
+                  <span>{m.icon}</span>{m.name}{isFav&&<span style={{color:"#f59e0b"}}>★</span>}
+                </button>)})}
+            </div>
+            <div style={{fontSize:11,fontWeight:600,color:"var(--t3)",marginBottom:8}}>AI COMMERCIAL TOOLS</div>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:14}}>
+              {AI_TOOLS.map(t=>{const isFav=prefs.favorites.includes("tool:"+t.id);return(
+                <button key={t.id} onClick={()=>{const favs=isFav?prefs.favorites.filter(f=>f!=="tool:"+t.id):[...prefs.favorites,"tool:"+t.id];savePrefs({favorites:favs})}} style={{fontSize:10,padding:"5px 10px",borderRadius:8,border:"1px solid "+(isFav?"var(--ac)":"var(--s3)"),background:isFav?"rgba(45,127,249,.1)":"var(--bg)",color:isFav?"var(--ac)":"var(--t2)",cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
+                  <span>{t.icon}</span>{t.name}{isFav&&<span style={{color:"#f59e0b"}}>★</span>}
+                </button>)})}
+            </div>
+            <div style={{fontSize:11,fontWeight:600,color:"var(--t3)",marginBottom:8}}>REPORTS</div>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>
+              {REPORTS.map(r=>{const isFav=prefs.favorites.includes("rpt:"+r.id);return(
+                <button key={r.id} onClick={()=>{const favs=isFav?prefs.favorites.filter(f=>f!=="rpt:"+r.id):[...prefs.favorites,"rpt:"+r.id];savePrefs({favorites:favs})}} style={{fontSize:10,padding:"5px 10px",borderRadius:8,border:"1px solid "+(isFav?"var(--ac)":"var(--s3)"),background:isFav?"rgba(45,127,249,.1)":"var(--bg)",color:isFav?"var(--ac)":"var(--t2)",cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
+                  <span>{r.icon}</span>{r.name}{isFav&&<span style={{color:"#f59e0b"}}>★</span>}
+                </button>)})}
+            </div>
+            {prefs.favorites.length>0&&<div style={{fontSize:10,color:"var(--ok)",marginTop:6}}>✅ {prefs.favorites.length} favorite{prefs.favorites.length>1?"s":""} selected — they'll appear on your dashboard</div>}
+          </div>
+
+          {/* ── Section 3: Default Preferences ── */}
+          <div style={{fontSize:14,fontWeight:700,marginBottom:10}}>⚙️ Default Preferences <span style={{fontSize:10,fontWeight:400,color:"var(--t3)"}}>(pre-filled in modules)</span></div>
+          <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:12,padding:16,marginBottom:20}}>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))",gap:12}}>
+              {[{k:"currency",l:"Default Currency",type:"select",opts:["INR","USD","EUR","GBP","JPY"]},
+                {k:"defaultOH",l:"Default Overhead %",type:"number",hint:"Pre-fills in Should-Cost"},
+                {k:"defaultProfit",l:"Default Profit %",type:"number",hint:"Pre-fills in Should-Cost"},
+                {k:"homeCity",l:"Home City / Plant Location",type:"text",hint:"Auto-fills transport origin"},
+              ].map(f=><div key={f.k} style={{background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:8,padding:10}}>
+                <div style={{fontSize:10,fontWeight:600,color:"var(--t3)",marginBottom:4}}>{f.l}</div>
+                {f.type==="select"?
+                  <select value={prefs[f.k]} onChange={e=>savePrefs({[f.k]:e.target.value})} style={{width:"100%",fontSize:13,fontWeight:700,border:"1px solid var(--s3)",borderRadius:4,padding:"5px 8px",background:"var(--s1)",color:"var(--t1)"}}>
+                    {f.opts.map(o=><option key={o}>{o}</option>)}</select>
+                  :<input type={f.type==="number"?"number":"text"} value={prefs[f.k]} onChange={e=>savePrefs({[f.k]:f.type==="number"?Number(e.target.value):e.target.value})} style={{width:"100%",fontFamily:f.type==="number"?"IBM Plex Mono":"inherit",fontSize:14,fontWeight:700,border:"1px solid var(--s3)",borderRadius:4,padding:"5px 8px",background:"var(--s1)",color:"var(--t1)"}} placeholder={f.hint}/>}
+                {f.hint&&<div style={{fontSize:8,color:"var(--t3)",marginTop:3}}>{f.hint}</div>}
+              </div>)}
+            </div>
+          </div>
+
+          {/* ── Section 4: Usage Stats ── */}
+          <div style={{fontSize:14,fontWeight:700,marginBottom:10}}>📊 Usage Statistics</div>
+          <div style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:12,padding:16,marginBottom:20}}>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))",gap:10}}>
+              {[["Total Analyses",history.length,"var(--ac)"],["AI Credits Left",credits,""],["Modules Available","14","var(--ok)"],["AI Tools","6","#8b5cf6"],["Reports","8","#f59e0b"],["Ebooks","10","#0891b2"],
+                ["Member Since",user.isBeta?"Beta Tester":"—",""],["Plan",user.isBeta?"🧪 Beta Pro":plan==="pro"?"Professional":"Starter",""]
+              ].map(([l,v,c],i)=><div key={i} style={{background:"var(--bg)",border:"1px solid var(--s2)",borderRadius:8,padding:10,textAlign:"center"}}>
+                <div style={{fontSize:9,color:"var(--t3)",textTransform:"uppercase"}}>{l}</div>
+                <div style={{fontFamily:"IBM Plex Mono",fontSize:18,fontWeight:700,color:c||"var(--t1)",marginTop:2}}>{v}</div>
+              </div>)}
+            </div>
+            {history.length>0&&<div style={{marginTop:12}}>
+              <div style={{fontSize:11,fontWeight:600,color:"var(--t3)",marginBottom:6}}>Most Used Modules</div>
+              <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                {(()=>{const counts={};history.forEach(h=>{counts[h.module]=(counts[h.module]||0)+1});return Object.entries(counts).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([id,cnt])=>{const m=MODS.find(x=>x.id===id);return m?<span key={id} style={{fontSize:10,padding:"3px 10px",borderRadius:6,background:"var(--s2)",color:"var(--t2)"}}>{m.icon} {m.name} ({cnt})</span>:null})})()}
+              </div>
+            </div>}
+          </div>
+        </div>}
+        {/* ═══ ADMIN DASHBOARD ═══ */}
+        {page==="admin"&&(user?.isAdmin||user?.email===BETA_CONFIG.adminEmail)&&<div style={{maxWidth:900}}>
+          <button className="mob-back" onClick={()=>{setPage("dashboard")}}>← Back to Dashboard</button>
+          <div style={{fontSize:20,fontWeight:800,marginBottom:4}}>🛡️ Beta Admin Dashboard</div>
+          <div style={{fontSize:12,color:"var(--t2)",marginBottom:16}}>Private view — only visible to {BETA_CONFIG.adminEmail}</div>
+          <AdminDashboard/>
+        </div>}
+        {page==="commodity"&&<div><button className="mob-back" onClick={()=>{setPage("dashboard")}}>← Back to Dashboard</button>{plan==="pro"?<CommodityIntel/>:<div style={{textAlign:"center",padding:"60px 20px"}}>
+          <div style={{fontSize:48,marginBottom:16}}>📈</div>
+          <div style={{fontSize:22,fontWeight:700,marginBottom:8}}>Commodity Index Intelligence</div>
+          <div style={{fontSize:13,color:"var(--t2)",marginBottom:20,maxWidth:500,margin:"0 auto 20px",lineHeight:1.7}}>Live AI-powered commodity watchlist with real-time web search. Track 15 commodities — Steel, Aluminum, Copper, Polymers, Rubber, Stainless Steel, Crude Oil. Get BUY/WAIT/HOLD signals, negotiation scripts, contract clauses, and smart actions.</div>
+          <div style={{display:"flex",justifyContent:"center",gap:8,marginBottom:24,flexWrap:"wrap"}}>
+            {["Live Web Search Prices","BUY/WAIT/HOLD Signals","Negotiation Scripts","Contract Clauses","Smart AI Actions","Risk Assessment"].map((f,i)=><span key={i} style={{fontSize:10,padding:"5px 12px",borderRadius:8,background:"var(--s2)",color:"var(--t2)",border:"1px solid var(--s3)"}}>✓ {f}</span>)}
+          </div>
+          <button className="btn-pri" style={{fontSize:14,padding:"12px 32px"}} onClick={upgrade}>⚡ Upgrade to Professional — ₹1,999/mo</button>
+          <div style={{fontSize:10,color:"var(--t3)",marginTop:8}}>Includes 50 AI extractions + 10 reports + Commodity Intelligence</div>
+        </div>}</div>}
+        {page==="reports"&&<div>
+          <button className="mob-back" onClick={()=>{setPage("dashboard");setActiveReport(null)}}>← Back to Dashboard</button>
+          <div style={{fontSize:20,fontWeight:700,marginBottom:4}}>📊 On-Demand Analysis Reports</div>
+          <p style={{fontSize:13,color:"var(--t2)",marginBottom:16}}>Upload your ERP data → Get instant AI analysis or request expert-reviewed report delivered in 24-48 hours</p>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:10}}>{REPORTS.map(r=><div key={r.id} className="rpt-card" onClick={()=>openReport(r.id)}>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}><span style={{fontSize:22}}>{r.icon}</span><div style={{fontSize:14,fontWeight:700}}>{r.name}</div></div>
+            <div style={{fontSize:11,color:"var(--t2)",marginBottom:8,lineHeight:1.5}}>{r.desc}</div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div><div style={{fontSize:9,color:"var(--t3)"}}>AI Instant</div><div style={{fontFamily:"IBM Plex Mono",fontSize:12,fontWeight:600,color:"var(--ac)"}}>{r.credits} credits</div></div>
+              <div style={{textAlign:"center"}}><div style={{fontSize:9,color:"var(--t3)"}}>Expert Review</div><div style={{fontFamily:"IBM Plex Mono",fontSize:12,fontWeight:600,color:"var(--warn)"}}>{r.expertPrice}</div></div>
+              <div style={{textAlign:"right"}}><div style={{fontSize:9,color:"var(--t3)"}}>Turnaround</div><div style={{fontSize:11,fontWeight:600}}>{r.turnaround}</div></div>
+            </div>
+          </div>)}</div>
+        </div>}
+        {page==="report"&&activeReport&&(()=>{const r=REPORTS.find(x=>x.id===activeReport);return r?<ReportRunner report={r} credits={credits} useCredit={useCredit} user={user} onBack={()=>{setPage("reports");setActiveReport(null)}}/>:null})()}
+        {page==="ai-tools"&&<div>
+          <button className="mob-back" onClick={()=>{setPage("dashboard");setActiveTool(null)}}>← Back to Dashboard</button>
+          <div style={{fontSize:20,fontWeight:700,marginBottom:4}}>⚡ AI Commercial Tools</div>
+          <div style={{fontSize:12,color:"var(--t2)",marginBottom:16}}>Instant AI-powered procurement analysis — quotation analysis, price validation, contract review, RFQ comparison, negotiation strategy.</div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:12}}>
+            {AI_TOOLS.map(t=><div key={t.id} onClick={()=>openTool(t.id)} style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:14,padding:20,cursor:"pointer",position:"relative",overflow:"hidden",transition:"border-color .2s"}} onMouseEnter={e=>e.currentTarget.style.borderColor="var(--ac)"} onMouseLeave={e=>e.currentTarget.style.borderColor="var(--s2)"}>
+              <div style={{position:"absolute",top:0,left:0,right:0,height:3,background:t.gradient}}/>
+              <div style={{fontSize:32,marginBottom:8}}>{t.icon}</div>
+              <div style={{fontSize:15,fontWeight:700,marginBottom:4}}>{t.name}</div>
+              <div style={{fontSize:11,color:"var(--t2)",lineHeight:1.6,marginBottom:10}}>{t.desc}</div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span style={{fontSize:10,color:"var(--ac)",fontWeight:600}}>{t.credits} credit{t.credits>1?"s":""}</span>
+                <span style={{fontSize:10,padding:"4px 12px",borderRadius:6,background:"var(--ac)",color:"#fff",fontWeight:600}}>Launch →</span>
+              </div>
+            </div>)}
+          </div>
+        </div>}
+        {page==="tool"&&activeTool&&(()=>{const t=AI_TOOLS.find(x=>x.id===activeTool);return t?(plan==="pro"?<AIToolRunner tool={t} credits={credits} useCredit={useCredit} user={user} onBack={()=>{setPage("ai-tools");setActiveTool(null)}}/>:<div style={{textAlign:"center",padding:"60px 20px"}}>
+          <div style={{fontSize:48,marginBottom:16}}>{t.icon}</div>
+          <div style={{fontSize:22,fontWeight:700,marginBottom:8}}>{t.name}</div>
+          <div style={{fontSize:13,color:"var(--t2)",marginBottom:20,maxWidth:500,margin:"0 auto 20px",lineHeight:1.7}}>{t.desc} This is a Professional plan feature.</div>
+          <button className="btn-pri" onClick={upgrade}>⚡ Upgrade to Professional — ₹1,999/mo</button>
+        </div>):null})()}
+        {page==="module"&&activeMod&&<div>
+          <button className="mob-back" onClick={()=>{setPage("dashboard");setActiveMod(null);setResult(null)}}>← Back to Dashboard</button>
+          {(()=>{const m=MODS.find(x=>x.id===activeMod);return m?<div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14,paddingBottom:10,borderBottom:"1px solid var(--s2)"}}><span style={{fontSize:26}}>{m.icon}</span><div><div style={{fontSize:16,fontWeight:700}}>{m.name}</div><div style={{fontSize:11,color:"var(--t3)"}}>{m.desc}</div></div></div>:null})()}
+          {activeMod==="should-cost"&&<ShouldCostModule onResult={handleResult} credits={credits} useCredit={useCredit}/>}
+          {activeMod==="tool-cost"&&<ToolCostModule onResult={handleResult} credits={credits} useCredit={useCredit}/>}
+          {activeMod==="packaging"&&<PackagingCostModule onResult={handleResult} credits={credits} useCredit={useCredit}/>}
+          {activeMod==="transport"&&<TransportCostModule onResult={handleResult} credits={credits} useCredit={useCredit}/>}
+          {!["should-cost","tool-cost","packaging","transport"].includes(activeMod)&&MCFG[activeMod]&&<GenericModule moduleId={activeMod} onResult={handleResult} credits={credits} useCredit={useCredit}/>}
+        </div>}
+        {page==="result"&&<ResultView result={result} plan={plan} onBack={()=>activeMod?setPage("module"):setPage("dashboard")}/>}
+      </div>
+      {/* Platform Footer */}
+      <div style={{borderTop:"1px solid var(--s2)",padding:"10px 20px",marginTop:"auto",background:"var(--s1)"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
+          <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+            <span style={{fontSize:10,fontWeight:700,fontFamily:"'Bricolage Grotesque',sans-serif",display:"flex",alignItems:"center",gap:4}}><CLIcon size={14}/> CostLens</span>
+            {["About","Privacy","Terms","Contact"].map(p=><span key={p} style={{fontSize:9,color:"var(--ac)",cursor:"pointer",textDecoration:"none"}} onClick={()=>{setUser(null);setLp(p.toLowerCase())}}>{p}</span>)}
+            <a href="mailto:support@costlens.technology" style={{fontSize:9,color:"var(--t3)",textDecoration:"none"}}>support@costlens.technology</a>
+          </div>
+          <span style={{fontSize:9,color:"var(--t3)"}}>© 2025 CostLens Technologies Pvt. Ltd.</span>
+        </div>
+        <div style={{fontSize:8,color:"var(--t3)",marginTop:4,fontStyle:"italic"}}>⚠️ {AI_DISCLAIMER}</div>
+      </div>
+      </div>
+    </div>
+  </div>);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CSS
+// ═══════════════════════════════════════════════════════════════
+const CSS=`
+@import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@400;500;600;700;800&family=DM+Sans:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#070b14;--s1:#0c1220;--s2:#131a2e;--s3:#1c2541;--s4:#263054;--t1:#eef0f6;--t2:#99a3bf;--t3:#5c6580;--ac:#2d7ff9;--ok:#10b981;--warn:#f59e0b;--err:#f43f5e}
+.CL{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--t1);min-height:100vh}
+h1,h2,h3,h4{font-family:'Bricolage Grotesque',sans-serif}
+.wrap{max-width:1100px;margin:0 auto;padding:0 24px}
+.badge{display:inline-block;font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:1.5px;color:var(--ac);background:rgba(45,127,249,.08);border:1px solid rgba(45,127,249,.2);padding:4px 12px;border-radius:16px;margin-bottom:10px}
+.nav{position:fixed;top:0;left:0;right:0;z-index:100;padding:10px 0;background:rgba(7,11,20,.88);backdrop-filter:blur(12px);border-bottom:1px solid rgba(255,255,255,.04)}
+.nav-logo{font-family:'Bricolage Grotesque',sans-serif;font-weight:800;font-size:20px;cursor:pointer;display:flex;align-items:center;gap:3px}.nav-link{color:var(--t2);font-size:12px;font-weight:500;cursor:pointer;text-decoration:none}.nav-link:hover{color:var(--t1)}
+.layout{display:flex;min-height:100vh}
+.sidebar{width:210px;background:var(--s1);border-right:1px solid var(--s2);display:flex;flex-direction:column;flex-shrink:0}
+.sb-logo{padding:12px;font-family:'Bricolage Grotesque',sans-serif;font-weight:800;font-size:18px;border-bottom:1px solid var(--s2);cursor:pointer;display:flex;align-items:center;gap:3px}
+.sb-nav{flex:1;overflow-y:auto;padding:6px}.sb-cat{font-size:8px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:1px;padding:10px 8px 2px}
+.sb-item{display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:6px;cursor:pointer;font-size:11px;color:var(--t2);transition:all .15s}.sb-item:hover{background:var(--s2);color:var(--t1)}.sb-item.active{background:rgba(45,127,249,.1);color:var(--ac)}
+.sb-bottom{border-top:1px solid var(--s2);padding:8px}
+.sb-credits-row{display:flex;align-items:center;gap:6px;padding:4px 8px}.sb-cbar{flex:1;height:4px;background:var(--s3);border-radius:2px;overflow:hidden}
+.sb-upgrade{display:block;margin:4px 8px;padding:5px;background:linear-gradient(135deg,#2d7ff9,#6366f1);color:#fff;border:none;border-radius:5px;font-size:9px;font-weight:600;cursor:pointer;font-family:'DM Sans';text-align:center;width:calc(100% - 16px)}
+.main{flex:1;overflow-y:auto;display:flex;flex-direction:column}.main-pad{padding:20px 28px;max-width:1000px;flex:1}
+.dash-stats{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
+.dash-stat{background:var(--s1);border:1px solid var(--s2);border-radius:8px;padding:12px 16px;min-width:100px;flex:1}
+.mod-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px;margin-bottom:16px}
+.mod-card{background:var(--s1);border:1px solid var(--s2);border-radius:10px;padding:14px;cursor:pointer;transition:all .2s;position:relative;overflow:hidden}.mod-card:hover{border-color:var(--s4);transform:translateY(-2px)}
+.hist-item{background:var(--s1);border:1px solid var(--s2);border-radius:6px;padding:8px 12px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;margin-bottom:3px;transition:background .15s}.hist-item:hover{background:var(--s2)}
+.mod-in{max-width:600px}
+.fu{border:2px dashed var(--s3);border-radius:8px;padding:16px;text-align:center;cursor:pointer;background:var(--s1);margin-bottom:10px;transition:all .2s}.fu:hover{border-color:var(--ac)}
+.sec-badge{display:flex;align-items:center;gap:6px;font-size:9px;color:var(--ok);padding:5px 0 8px;opacity:.85}.sec-badge-icon{font-size:11px}
+.anon-toggle{display:flex;align-items:center;gap:10px;background:rgba(37,99,235,.04);border:1px solid rgba(37,99,235,.12);border-radius:8px;padding:10px 14px;margin:8px 0 12px;cursor:pointer;user-select:none}.anon-toggle:hover{background:rgba(37,99,235,.08)}
+.anon-sw{width:36px;height:20px;border-radius:10px;position:relative;transition:all .2s;flex-shrink:0}.anon-sw::after{content:"";position:absolute;width:16px;height:16px;border-radius:50%;background:#fff;top:2px;left:2px;transition:all .2s}
+.anon-sw.on{background:var(--ac)}.anon-sw.on::after{left:18px}.anon-sw.off{background:var(--s3)}
+.nda-box{background:var(--s1);border:1px solid var(--s2);border-radius:10px;padding:16px;margin:16px 0}
+.nda-signed{background:rgba(16,185,129,.06);border:1px solid rgba(16,185,129,.25);border-radius:10px;padding:14px;margin:16px 0;display:flex;align-items:center;gap:10px}
+.trust-card{background:var(--s1);border:1px solid var(--s2);border-radius:12px;padding:20px;margin-bottom:12px}
+.trust-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:16px 0}
+.trust-stat{text-align:center;padding:16px;background:var(--bg);border-radius:10px;border:1px solid var(--s2)}
+.fu-chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;justify-content:center}.fu-chip{display:inline-flex;align-items:center;gap:3px;background:var(--s2);border:1px solid var(--s3);border-radius:4px;padding:2px 6px;font-size:9px;color:var(--t2)}.fu-chip button{background:none;border:none;color:var(--t3);cursor:pointer;font-size:9px}
+.mod-notes{width:100%;background:var(--s1);border:1px solid var(--s3);border-radius:6px;color:var(--t1);padding:8px 10px;font-family:'DM Sans';font-size:12px;resize:vertical;min-height:36px;margin-bottom:10px;outline:none}.mod-notes:focus{border-color:var(--ac)}.mod-notes::placeholder{color:var(--t3)}
+.mod-field{margin-bottom:6px}.mod-field label{display:block;font-size:9px;font-weight:500;color:var(--t2);margin-bottom:2px;text-transform:uppercase;letter-spacing:.3px}
+.mod-field input,.mod-field select{width:100%;background:var(--s1);border:1px solid var(--s3);border-radius:5px;color:var(--t1);padding:6px 8px;font-family:'DM Sans';font-size:12px;outline:none}.mod-field input:focus,.mod-field select:focus{border-color:var(--ac)}.mod-field select option{background:var(--s1)}
+.mod-loading{background:rgba(45,127,249,.06);border:1px solid rgba(45,127,249,.2);border-radius:6px;padding:10px;text-align:center;color:var(--ac);font-size:11px;margin-bottom:8px;animation:pulse 1.5s infinite}
+.mod-err{background:rgba(244,63,94,.06);border:1px solid rgba(244,63,94,.2);border-radius:6px;padding:6px 10px;color:var(--err);font-size:10px;margin-bottom:8px}
+.mod-actions{display:flex;gap:6px;justify-content:flex-end;margin-top:10px}
+.btn-pri,.btn-sec{font-family:'DM Sans';font-size:12px;font-weight:600;padding:8px 18px;border-radius:7px;border:none;cursor:pointer;transition:all .2s}
+.btn-pri{background:var(--ac);color:#fff}.btn-pri:hover{background:#1a6be6}.btn-pri:disabled{opacity:.4;cursor:not-allowed}
+.btn-sec{background:var(--s2);color:var(--t2);border:1px solid var(--s3)}.btn-sec:hover{background:var(--s3)}
+.mob-back{background:none;border:none;color:var(--ac);font-family:'DM Sans';font-size:12px;font-weight:600;cursor:pointer;padding:4px 0;margin-bottom:14px;display:flex;align-items:center;gap:4px}.mob-back:hover{text-decoration:underline}
+.mod-bar{display:flex;gap:5px;margin-bottom:10px;flex-wrap:wrap;background:var(--s1);border:1px solid var(--s2);border-radius:8px;padding:8px 12px}
+.mod-stat{text-align:center;flex:1;min-width:60px}.ms-l{font-size:7px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px;display:block}.ms-v{font-family:'IBM Plex Mono';font-weight:600;font-size:13px;display:block}.mod-stat.hl .ms-v{color:var(--ac);font-size:15px}
+.section-head{font-size:11px;font-weight:600;color:var(--t2);margin:10px 0 4px;padding-bottom:3px;border-bottom:1px solid var(--s2)}
+.tpl-zone{background:rgba(245,158,11,.04);border:1px solid rgba(245,158,11,.15);border-radius:8px;padding:12px;margin-bottom:8px}
+.tpl-title{font-size:11px;font-weight:600;color:var(--warn);margin-bottom:6px}.tpl-btns{display:flex;flex-wrap:wrap;gap:4px}
+.tpl-btn{background:var(--s2);border:1px solid var(--s3);color:var(--t1);border-radius:6px;padding:6px 12px;font-size:10px;cursor:pointer;font-family:'DM Sans';font-weight:500}.tpl-btn:hover{border-color:var(--warn)}
+.route-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:6px}
+.otw{overflow-x:auto;margin-bottom:4px}.ot{width:100%;border-collapse:collapse;font-size:11px}
+.ot thead th{text-align:left;padding:4px;font-size:8px;text-transform:uppercase;letter-spacing:.3px;color:var(--t3);border-bottom:2px solid var(--s3);font-weight:600;white-space:nowrap}
+.ot tbody td{padding:2px 3px;border-bottom:1px solid var(--s2)}
+.ot-txt,.ot-num,.ot-sel{width:100%;background:transparent;border:1px solid transparent;border-radius:3px;color:var(--t1);padding:3px 4px;font-family:'DM Sans';font-size:11px;outline:none}
+.ot-txt:focus,.ot-num:focus,.ot-sel:focus{border-color:var(--s4);background:var(--s1)}.ot-num{font-family:'IBM Plex Mono';text-align:right}
+.ot-sel{font-size:9px;color:var(--t2);cursor:pointer}.ot-sel option{background:var(--s1)}
+.ot-cost{font-family:'IBM Plex Mono';font-weight:600;text-align:right;padding-right:6px}
+.ot-rm{background:none;border:none;color:var(--t3);cursor:pointer;font-size:10px}.ot-rm:hover{color:var(--err)}
+.ot-add{background:none;border:1px dashed var(--s3);color:var(--t3);font-size:10px;padding:4px;border-radius:4px;cursor:pointer;width:100%;font-family:'DM Sans'}.ot-add:hover{border-color:var(--ac);color:var(--ac)}.ot tfoot td{padding:2px}
+.ai-assist-zone{margin:8px 0;border-radius:8px;overflow:hidden}
+.ai-toggle{width:100%;background:var(--s1);border:1px dashed var(--s3);color:var(--t3);font-size:11px;font-weight:500;padding:8px 12px;border-radius:8px;cursor:pointer;font-family:'DM Sans';display:flex;align-items:center;gap:6px;transition:all .2s}.ai-toggle:hover{border-color:var(--ac);color:var(--t2)}
+.ai-panel{background:rgba(45,127,249,.03);border:1px solid rgba(45,127,249,.12);border-top:none;border-radius:0 0 8px 8px;padding:12px;margin-top:-1px}
+.help-zone{margin-bottom:10px;border-radius:8px;overflow:hidden}
+.help-toggle{width:100%;background:rgba(16,185,129,.04);border:1px solid rgba(16,185,129,.15);color:var(--ok);font-size:11px;font-weight:500;padding:8px 12px;border-radius:8px;cursor:pointer;font-family:'DM Sans';display:flex;align-items:center;gap:6px;transition:all .2s}.help-toggle:hover{background:rgba(16,185,129,.08)}
+.help-panel{background:rgba(16,185,129,.03);border:1px solid rgba(16,185,129,.12);border-top:none;border-radius:0 0 8px 8px;padding:14px;margin-top:-1px}
+.help-section{display:flex;gap:10px;margin-bottom:12px;align-items:flex-start}.help-section:last-child{margin-bottom:0}
+.help-icon{font-size:16px;flex-shrink:0;margin-top:1px}
+.help-label{font-size:11px;font-weight:700;color:var(--t1);margin-bottom:3px;text-transform:uppercase;letter-spacing:.3px}
+.help-text{font-size:12px;color:var(--t2);line-height:1.6}
+.help-list{list-style:none;padding:0;margin:0}.help-list li{font-size:11px;color:var(--t2);line-height:1.6;padding:2px 0;padding-left:14px;position:relative}.help-list li::before{content:"→";position:absolute;left:0;color:var(--ok);font-size:10px}
+.result-view{max-width:700px}
+.rv-badge{background:var(--s1);border:1px solid var(--s3);border-radius:12px;padding:2px 8px;font-size:9px;color:var(--t2);white-space:nowrap}
+.rv-badge b{color:var(--t1)}
+.rv-badge-ok{background:rgba(16,185,129,.12);color:#34d399;border-color:rgba(16,185,129,.3)}
+.rv-badge-warn{background:rgba(239,68,68,.12);color:#f87171;border-color:rgba(239,68,68,.3)}
+.rv-badge-med{background:rgba(245,158,11,.12);color:#fbbf24;border-color:rgba(245,158,11,.3)}
+.rv-table{width:100%;border-collapse:collapse;font-size:11px;margin-bottom:6px}
+.rv-table thead th{padding:5px 8px;font-size:9px;text-transform:uppercase;letter-spacing:.3px;color:var(--t3);border-bottom:2px solid var(--s3)}
+.rv-table tbody td{padding:5px 8px;border-bottom:1px solid var(--s2);font-size:11px}
+.rv-table tbody tr:hover{background:rgba(37,99,235,.04)}
+.rv-table tfoot td{font-weight:700;border-top:2px solid var(--ac);padding:7px 8px}
+@keyframes pulse{0%,100%{opacity:.7}50%{opacity:1}}
+@keyframes saSpin{to{transform:rotate(360deg)}}
+@media(max-width:768px){.sidebar{display:none}.route-grid{grid-template-columns:1fr 1fr}}
+@media print{.sidebar,.sb-bottom,.mod-actions,.nav{display:none!important}.layout{display:block}.CL{background:#fff!important;color:#222!important}*{color-adjust:exact!important;-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}.result-view{max-width:100%}.rv-table{font-size:10px}.rv-badge{border:1px solid #ccc}.mod-bar{display:none}}
+.CL.light{--bg:#f4f6fa;--s1:#ffffff;--s2:#e5e8f0;--s3:#cdd2de;--s4:#b3baca;--t1:#1a2336;--t2:#4e5a71;--t3:#8694a9;--ac:#2563eb;--ok:#059669;--warn:#d97706;--err:#dc2626}
+.CL.light .nav{background:rgba(255,255,255,.92);border-bottom:1px solid #e5e8f0;box-shadow:0 1px 3px rgba(0,0,0,.04)}
+.CL.light .nav-logo{color:#1a2336}
+.CL.light .sidebar{background:#1e293b;color:#c0c9db;border-right:none}
+.CL.light .sb-logo{color:#fff;border-bottom-color:#2a3750}
+.CL.light .sb-cat{color:#667892}
+.CL.light .sb-item{color:#96a3b8}.CL.light .sb-item:hover{background:#2a3750;color:#dde3ed}.CL.light .sb-item.active{background:rgba(37,99,235,.2);color:#8bb4ff}
+.CL.light .sb-bottom{border-top-color:#2a3750}
+.CL.light .sb-cbar{background:#334564}
+.CL.light .mod-card{box-shadow:0 1px 3px rgba(0,0,0,.04)}.CL.light .mod-card:hover{box-shadow:0 4px 12px rgba(37,99,235,.08);border-color:#2563eb}
+.CL.light .dash-stat{box-shadow:0 1px 3px rgba(0,0,0,.04)}
+.CL.light .mod-bar{box-shadow:0 1px 3px rgba(0,0,0,.04)}
+.CL.light .tpl-btn{box-shadow:0 1px 2px rgba(0,0,0,.04)}.CL.light .tpl-btn:hover{box-shadow:0 2px 6px rgba(217,119,6,.1)}
+.CL.light .hist-item{box-shadow:0 1px 2px rgba(0,0,0,.03)}.CL.light .hist-item:hover{background:rgba(37,99,235,.03)}
+.CL.light .mod-field select option,.CL.light .ot-sel option{background:#fff}
+.CL.light .mod-notes:focus,.CL.light .mod-field input:focus,.CL.light .mod-field select:focus{box-shadow:0 0 0 3px rgba(37,99,235,.08)}
+.CL.light .rpt-card{box-shadow:0 1px 3px rgba(0,0,0,.04)}.CL.light .rpt-card:hover{box-shadow:0 4px 12px rgba(217,119,6,.08)}
+.CL.light .rpt-section,.CL.light .rpt-header,.CL.light .rpt-path{box-shadow:0 1px 3px rgba(0,0,0,.04)}
+.CL.light .rv-total{box-shadow:0 2px 8px rgba(37,99,235,.1)}
+.CL.light .fu:hover{background:rgba(37,99,235,.02)}
+.CL.light .ai-toggle:hover{background:rgba(37,99,235,.02)}
+.CL.light .ot-txt:focus,.CL.light .ot-num:focus{background:rgba(37,99,235,.02)}
+.rpt-card{background:var(--s1);border:1px solid var(--s2);border-left:3px solid var(--warn);border-radius:10px;padding:16px;cursor:pointer;transition:all .2s}.rpt-card:hover{border-color:var(--s4);transform:translateY(-2px)}
+.rpt-data-box{background:rgba(245,158,11,.04);border:1px solid rgba(245,158,11,.15);border-radius:8px;padding:12px;margin-bottom:10px}
+.rpt-data-title{font-size:11px;font-weight:700;color:var(--warn);margin-bottom:6px}
+.rpt-data-item{font-size:11px;color:var(--t2);padding:2px 0;line-height:1.5}
+.rpt-paths{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:12px 0}
+.rpt-path{background:var(--s1);border:1px solid var(--s2);border-radius:10px;padding:16px;position:relative}
+.rpt-path-ai{border-color:rgba(45,127,249,.2)}.rpt-path-expert{border-color:rgba(245,158,11,.2)}
+.rpt-path-badge{display:inline-block;font-size:8px;font-weight:700;letter-spacing:1px;color:#fff;background:var(--ac);padding:2px 8px;border-radius:10px;margin-bottom:8px}
+.rpt-header{display:flex;align-items:center;gap:12px;margin-bottom:16px;padding:12px;background:var(--s1);border:1px solid var(--s2);border-radius:10px}
+.rpt-section{margin-bottom:16px;padding:12px;background:var(--s1);border:1px solid var(--s2);border-radius:8px}
+.rpt-section-title{font-size:12px;font-weight:700;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--s2)}
+.rpt-metrics-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:6px}
+.rpt-metric-card{background:var(--bg);border:1px solid var(--s2);border-radius:6px;padding:8px;text-align:center}
+.rpt-finding-item{display:flex;align-items:flex-start;gap:8px;padding:4px 0;font-size:12px;color:var(--t2);line-height:1.5}
+.rpt-num{background:var(--ac);color:#fff;width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;flex-shrink:0}
+.rpt-finding-row{display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:1px solid var(--s2)}
+.rpt-finding-rank{font-family:'IBM Plex Mono';font-weight:700;color:var(--ac);font-size:13px;min-width:28px}
+.rpt-sev{font-size:8px;font-weight:700;padding:2px 8px;border-radius:10px;text-transform:uppercase;flex-shrink:0;letter-spacing:.5px}
+.rpt-sev.high{background:rgba(244,63,94,.12);color:var(--err)}.rpt-sev.medium{background:rgba(245,158,11,.12);color:var(--warn)}.rpt-sev.low{background:rgba(16,185,129,.12);color:var(--ok)}
+.rpt-expert-cta{background:rgba(245,158,11,.04);border:1px solid rgba(245,158,11,.2);border-radius:10px;padding:16px;margin-top:16px;text-align:center}
+@media(max-width:768px){.rpt-paths{grid-template-columns:1fr}.rpt-metrics-grid{grid-template-columns:repeat(2,1fr)}}
+`;
